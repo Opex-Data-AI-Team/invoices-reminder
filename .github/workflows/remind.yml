@@ -8,7 +8,7 @@ on:
         description: "1 = really send, 0 = dry run"
         default: "0"
       list_clients:
-        description: "1 = just list clients with unpaid or draft invoices (for the Clients tab)"
+        description: "1 = list clients with unpaid or draft invoices (Clients tab); all = every client on any invoice (Client, Region, Rep sheet)"
         default: "0"
 jobs:
   remind:

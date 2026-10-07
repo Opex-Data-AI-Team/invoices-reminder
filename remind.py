@@ -247,10 +247,22 @@ def client_list(invs_by_org):
     return rows
 
 
+def all_clients(invs_by_org):
+    """Distinct client names across every invoice of any status, A-Z, for the Region/Rep sheet."""
+    return sorted({i["customer_name"].strip() for invs in invs_by_org.values() for i in invs}, key=str.lower)
+
+
 def export_clients(invs):
+    emit([("Organization", "Client name", "Rep"), *client_list(invs)])
+
+
+def export_regions(invs):
+    emit([("Client", "Region", "Rep"), *[(n, "", "") for n in all_clients(invs)]])
+
+
+def emit(rows):
     buf = io.StringIO()
-    w = csv.writer(buf, lineterminator="\n")
-    w.writerows([("Organization", "Client name", "Rep"), *client_list(invs)])
+    csv.writer(buf, lineterminator="\n").writerows(rows)
     print(buf.getvalue())
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:  # shows as a copyable block on the run page (private repo only)
@@ -270,6 +282,8 @@ def main():
                 for n, i in (p.split("=") for p in os.environ["ZOHO_ORGS"].split(","))}
     if os.environ.get("LIST_CLIENTS") == "1":
         return export_clients(invs)
+    if os.environ.get("LIST_CLIENTS") == "all":
+        return export_regions(invs)
     reps_rows = read_csv(os.environ["REPS_SRC"])
     clients = read_csv(os.environ["CLIENTS_SRC"])
     follow = {(r["Organization"].strip().lower(), r["Invoice"].strip()): r
