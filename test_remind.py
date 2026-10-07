@@ -1,7 +1,7 @@
 """Run: python test_remind.py  (no dependencies)"""
 from datetime import date
 
-from remind import UN, build, compose_rep, is_workday, pct, rank, tier
+from remind import UN, build, client_list, compose_rep, is_workday, pct, rank, tier
 
 TODAY = date(2026, 10, 6)  # a Tuesday
 
@@ -66,6 +66,12 @@ def test_message_has_stats_and_tone():
     items, stats, outst, oldest = run()
     subj, body, escalate = compose_rep("Ann Obi", [i for i in items if i["rep"] == "Ann"], stats, outst, oldest)
     assert escalate and "Chase it today" in body and "collection rate" in body and "never sent" in body.lower()
+
+
+def test_client_list_only_owing_clients_biggest_first():
+    rows = client_list(INVS)
+    assert rows == [("Org", "A", ""), ("Org", "B", ""), ("Org", "Z", "")]   # A owes 2000, B 1300, Z 100; void and paid ignored
+    assert client_list({"Org": [inv("P", "Paid Co", "paid", 5, 0, "2026-09-01")]}) == []
 
 
 def test_fetch_retries_timeouts_but_not_client_errors():

@@ -235,10 +235,41 @@ def deliver(msgs, send):
     print(f"{len(msgs)} message(s) sent.")
 
 
+def client_list(invs_by_org):
+    """(Organization, Client name, Rep='') for clients with unpaid or draft invoices, biggest balance first."""
+    rows = []
+    for org, invs in invs_by_org.items():
+        owed = defaultdict(float)
+        for i in invs:
+            if classify(i) in ("open", "draft"):
+                owed[i["customer_name"].strip()] += i["balance"]
+        rows += [(org, name, "") for name, _ in sorted(owed.items(), key=lambda kv: -kv[1])]
+    return rows
+
+
+def export_clients(invs):
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\n")
+    w.writerows([("Organization", "Client name", "Rep"), *client_list(invs)])
+    print(buf.getvalue())
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:  # shows as a copyable block on the run page (private repo only)
+        with open(summary, "a", encoding="utf-8") as f:
+            f.write("```csv\n" + buf.getvalue() + "```\n")
+
+
 def main():
     today = datetime.now(WAT).date()
     if not is_workday(today) and not os.environ.get("FORCE"):
         return print("Weekend, skipping.")
+    if os.environ.get("INVOICES_FIXTURE"):  # offline testing
+        invs = json.load(open(os.environ["INVOICES_FIXTURE"]))
+    else:
+        token = zoho_token()
+        invs = {n.strip(): fetch_invoices(token, i.strip())
+                for n, i in (p.split("=") for p in os.environ["ZOHO_ORGS"].split(","))}
+    if os.environ.get("LIST_CLIENTS") == "1":
+        return export_clients(invs)
     reps_rows = read_csv(os.environ["REPS_SRC"])
     clients = read_csv(os.environ["CLIENTS_SRC"])
     follow = {(r["Organization"].strip().lower(), r["Invoice"].strip()): r
@@ -247,12 +278,6 @@ def main():
     managers = [r for r in reps_rows if r["Role"].strip() == "manager"]
     rep_of = {(c["Organization"].strip().lower(), c["Client name"].strip().lower()): c["Rep"].strip()
               for c in clients if c["Rep"].strip() in reps}
-    if os.environ.get("INVOICES_FIXTURE"):  # offline testing
-        invs = json.load(open(os.environ["INVOICES_FIXTURE"]))
-    else:
-        token = zoho_token()
-        invs = {n.strip(): fetch_invoices(token, i.strip())
-                for n, i in (p.split("=") for p in os.environ["ZOHO_ORGS"].split(","))}
     items, stats, outst, oldest = build(invs, rep_of, follow, today)
     msgs = []
     for rep, row in reps.items():
