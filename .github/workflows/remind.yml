@@ -1,0 +1,28 @@
+name: remind
+on:
+  schedule:
+    - cron: "0 7 * * 1-5" # 07:00 UTC = 08:00 Lagos, Mon-Fri
+  workflow_dispatch:
+    inputs:
+      send:
+        description: "1 = really send, 0 = dry run"
+        default: "0"
+jobs:
+  remind:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 test_remind.py
+      - run: python3 remind.py
+        env:
+          SEND: ${{ inputs.send || vars.SEND }} # repo variable SEND=1 turns on real sending
+          ZOHO_ORGS: ${{ vars.ZOHO_ORGS }} # e.g. Regtech=894826960,OPEX Consulting=790222018
+          REPS_SRC: ${{ secrets.REPS_SRC }}
+          CLIENTS_SRC: ${{ secrets.CLIENTS_SRC }}
+          FOLLOWUPS_SRC: ${{ secrets.FOLLOWUPS_SRC }}
+          ZOHO_CLIENT_ID: ${{ secrets.ZOHO_CLIENT_ID }}
+          ZOHO_CLIENT_SECRET: ${{ secrets.ZOHO_CLIENT_SECRET }}
+          ZOHO_REFRESH_TOKEN: ${{ secrets.ZOHO_REFRESH_TOKEN }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
