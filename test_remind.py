@@ -68,6 +68,42 @@ def test_message_has_stats_and_tone():
     assert escalate and "Chase it today" in body and "collection rate" in body and "never sent" in body.lower()
 
 
+def test_fetch_retries_timeouts_but_not_client_errors():
+    import urllib.error
+    import urllib.request
+
+    import remind
+
+    class Resp:
+        def read(self):
+            return b"ok"
+
+    calls = []
+    real_open, real_sleep = urllib.request.urlopen, remind.time.sleep
+    remind.time.sleep = lambda s: None
+    try:
+        def flaky(req, timeout=0):
+            calls.append(1)
+            if len(calls) < 3:
+                raise TimeoutError("slow")
+            return Resp()
+        urllib.request.urlopen = flaky
+        assert remind.fetch("x") == b"ok" and len(calls) == 3        # 2 timeouts then success
+
+        calls.clear()
+        def denied(req, timeout=0):
+            calls.append(1)
+            raise urllib.error.HTTPError("x", 401, "no", {}, None)
+        urllib.request.urlopen = denied
+        try:
+            remind.fetch("x")
+            assert False
+        except urllib.error.HTTPError:
+            assert len(calls) == 1                                   # 401 is not retried
+    finally:
+        urllib.request.urlopen, remind.time.sleep = real_open, real_sleep
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

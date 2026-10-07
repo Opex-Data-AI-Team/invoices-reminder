@@ -10,6 +10,7 @@ import os
 import smtplib
 import ssl
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from collections import defaultdict
@@ -166,9 +167,23 @@ def compose_manager(items, stats, reps):
 
 
 # ---------- IO ----------
+def fetch(req, timeout=90, tries=3):
+    """urlopen with retries: Apps Script cold starts can be slow, 5xx and timeouts are transient."""
+    for n in range(tries):
+        try:
+            return urllib.request.urlopen(req, timeout=timeout).read()
+        except urllib.error.HTTPError as e:
+            if e.code < 500 or n == tries - 1:
+                raise
+        except (TimeoutError, urllib.error.URLError):
+            if n == tries - 1:
+                raise
+        time.sleep(3 * 2 ** n)
+
+
 def read_csv(src):
     if src.startswith("http"):
-        text = urllib.request.urlopen(src, timeout=30).read().decode("utf-8-sig")
+        text = fetch(src).decode("utf-8-sig")
     else:
         text = open(src, encoding="utf-8-sig").read()
     return list(csv.DictReader(io.StringIO(text)))
@@ -178,7 +193,7 @@ def zoho_token():
     q = urllib.parse.urlencode({"grant_type": "refresh_token", "client_id": os.environ["ZOHO_CLIENT_ID"],
                                 "client_secret": os.environ["ZOHO_CLIENT_SECRET"],
                                 "refresh_token": os.environ["ZOHO_REFRESH_TOKEN"]})
-    res = json.load(urllib.request.urlopen(urllib.request.Request(f"{TOKEN_URL}?{q}", method="POST"), timeout=30))
+    res = json.loads(fetch(urllib.request.Request(f"{TOKEN_URL}?{q}", method="POST")))
     if "access_token" not in res:
         raise SystemExit(f"Zoho token error: {res.get('error')}")
     return res["access_token"]
@@ -189,7 +204,7 @@ def fetch_invoices(token, org_id):
     while True:
         q = urllib.parse.urlencode({"organization_id": org_id, "page": page, "per_page": 200})
         req = urllib.request.Request(f"{API}/invoices?{q}", headers={"Authorization": f"Zoho-oauthtoken {token}"})
-        res = json.load(urllib.request.urlopen(req, timeout=60))
+        res = json.loads(fetch(req))
         out += res["invoices"]
         if not res["page_context"]["has_more_page"]:
             return out
