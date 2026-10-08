@@ -16,27 +16,33 @@ import urllib.request
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from email.message import EmailMessage
+from html import escape as esc
 
 WAT = timezone(timedelta(hours=1))  # Africa/Lagos
 API = "https://www.zohoapis.com/books/v3"  # US data centre
 TOKEN_URL = "https://accounts.zoho.com/oauth/v2/token"
-WINDOW = 30  # days used for collection rate
+FY_START_MONTH = 1  # fiscal year start (1 = calendar year); collection rate runs from here to today
 DRAFT_GRACE = 3  # days before a never-sent draft is flagged
-MIN_RANK = 3  # invoices in window needed to be ranked
 UN = "(unassigned)"
 TIERS = [(21, "decision"), (14, "blunt"), (7, "firm"), (0, "coach")]
 OPENERS = {
+    "early": "{n}, you have open invoices that are not yet due. Confirm each client has received theirs and knows the due date.",
     "coach": "{n}, a quick nudge on your open invoices.",
     "firm": "{n}, some invoices are a week or more overdue. We need movement today.",
     "blunt": "{n}. Money is sitting uncollected. Chase it today and log the result, no excuses.",
     "decision": "{n}, an invoice is 21+ days overdue. Decide today: collect, void or write off, and log it.",
 }
-ORDER = ["coach", "firm", "blunt", "decision"]
+ORDER = ["early", "coach", "firm", "blunt", "decision"]
 
 
 # ---------- pure logic (tested in test_remind.py) ----------
 def d(s):
     return date.fromisoformat(s[:10])
+
+
+def fy_start(today):
+    y = today.year if today.month >= FY_START_MONTH else today.year - 1
+    return date(y, FY_START_MONTH, 1)
 
 
 def is_workday(day):
@@ -47,7 +53,7 @@ def tier(days):
     for lo, name in TIERS:
         if days >= lo:
             return name
-    return "coach"
+    return "early"  # not yet due
 
 
 def classify(inv):
@@ -69,7 +75,7 @@ def build(invs_by_org, rep_of, follow, today):
             if kind == "void":
                 continue
             rep = rep_of.get((org.lower(), i["customer_name"].strip().lower()), UN)
-            if kind in ("paid", "open") and (today - d(i["date"])).days <= WINDOW:
+            if d(i["date"]) >= fy_start(today):
                 for k in (rep, "__team__", "org:" + org):
                     s = stats[k]
                     s[0] += i["total"]
@@ -81,8 +87,8 @@ def build(invs_by_org, rep_of, follow, today):
                 days = (today - d(i["due_date"])).days
                 outst[rep] += i["balance"]
                 oldest[rep] = max(oldest[rep], days)
-                if days < 0:
-                    continue
+                if days < 0 and (today - d(i["created_time"])).days < 1:
+                    continue  # raised today: reminders start tomorrow
             else:
                 days = (today - d(i["created_time"])).days
                 if days < DRAFT_GRACE:
@@ -93,10 +99,8 @@ def build(invs_by_org, rep_of, follow, today):
             broken = False
             if status == "dead":
                 continue
-            if status == "promised" and promised:
-                if d(promised) >= today:
-                    continue
-                broken = True
+            if status == "promised" and promised and d(promised) < today:
+                broken = True  # a promise no longer pauses reminders; only a missed one escalates
             t = tier(days)
             if broken and ORDER.index(t) < ORDER.index("blunt"):
                 t = "blunt"
@@ -114,28 +118,22 @@ def fp(p):
     return "n/a" if p is None else f"{p:.0f}%"
 
 
-def rank(stats, rep):
-    elig = {k: v for k, v in stats.items()
-            if k not in (UN, "__team__") and not k.startswith("org:") and v[2] >= MIN_RANK and v[0] > 0}
-    if rep not in elig:
-        return None
-    order = sorted(elig, key=lambda k: -pct(elig[k]))
-    return order.index(rep) + 1, len(order)
+def when(days):
+    return f"due in {-days}d" if days < 0 else "due today" if days == 0 else f"{days}d overdue"
 
 
 def line(it):
-    what = "NEVER SENT (draft)" if it["kind"] == "draft" else f"{it['days']}d overdue"
+    what = "NEVER SENT (draft)" if it["kind"] == "draft" else when(it["days"])
     extra = "  ** BROKEN PROMISE **" if it["broken"] else ""
-    return f"- [{it['tier'].upper()}] {it['org']} {it['number']} {it['client']}: NGN {it['balance']:,.0f}, {what}{extra}"
+    return f"- {it['org']} {it['number']} {it['client']}: NGN {it['balance']:,.0f}, {what}{extra}"
 
 
 def stats_block(rep, items, stats, outst, oldest):
-    r = rank(stats, rep)
     orgs = sorted({i["org"] for i in items})
     lines = [
-        f"Your 30-day collection rate: {fp(pct(stats.get(rep)))} (NGN {stats[rep][1]:,.0f} of {stats[rep][0]:,.0f} invoiced)" if rep in stats
-        else "Your 30-day collection rate: n/a (nothing invoiced in the window)",
-        f"Team collection rate: {fp(pct(stats.get('__team__')))}   Your rank: {f'{r[0]} of {r[1]}' if r else 'n/a'}",
+        f"Your fiscal-year collection rate: {fp(pct(stats.get(rep)))} (NGN {stats[rep][1]:,.0f} of {stats[rep][0]:,.0f} invoiced)" if rep in stats
+        else "Your fiscal-year collection rate: n/a (nothing invoiced this fiscal year)",
+        f"Team collection rate: {fp(pct(stats.get('__team__')))}",
         "Org rates: " + (", ".join(f"{o} {fp(pct(stats.get('org:' + o)))}" for o in orgs) or "n/a"),
         f"Your outstanding: NGN {outst[rep]:,.0f}   Oldest unpaid: {oldest[rep]}d   Drafts never sent: {sum(1 for i in items if i['kind'] == 'draft')}",
     ]
@@ -151,19 +149,160 @@ def compose_rep(rep, items, stats, outst, oldest):
         "Needs action:", *[line(i) for i in sorted(items, key=lambda i: -i["days"])], "",
         "Log it in the Follow-ups tab: Status = Chasing / Promised (+ date) / Dead.",
     ])
-    return f"Collections: {len(items)} invoice(s) need you today ({worst})", body, ORDER.index(worst) >= 2
+    return f"Collections: {len(items)} invoice(s) need you today", body, ORDER.index(worst) >= ORDER.index("blunt")
 
 
 def compose_manager(items, stats, reps):
     rows = [f"- {r}: rate {fp(pct(stats.get(r)))}" for r in reps]
-    hot = [i for i in items if ORDER.index(i["tier"]) >= 2 or i["rep"] == UN]
+    hot = [i for i in items if ORDER.index(i["tier"]) >= ORDER.index("blunt") or i["rep"] == UN]
     body = "\n".join([
-        f"Team collection rate (30d): {fp(pct(stats.get('__team__')))}",
+        f"Team collection rate (fiscal year): {fp(pct(stats.get('__team__')))}",
         "By rep:", *rows, "",
         "Orgs: " + ", ".join(f"{k[4:]} {fp(pct(v))}" for k, v in sorted(stats.items()) if k.startswith("org:")), "",
-        "Escalations / unassigned:", *([f"- ({i['rep']}) " + line(i)[2:] for i in hot] or ["- none"]),
+        "Escalations / unassigned:", *([f"- ({i['rep']}, {i['tier']}) " + line(i)[2:] for i in hot] or ["- none"]),
     ])
     return "Collections: manager summary", body
+
+
+# ---------- HTML email (inline styles only: email clients ignore <style>/external CSS) ----------
+TIER_COLOR = {"early": "#0d9488", "coach": "#2563eb", "firm": "#d97706", "blunt": "#ea580c", "decision": "#dc2626"}
+INK, MUTED, LINE = "#0f172a", "#64748b", "#e2e8f0"
+
+
+def rate_color(p):  # green >= 75%, amber >= 50%, red below
+    return "#94a3b8" if p is None else "#16a34a" if p >= 75 else "#d97706" if p >= 50 else "#dc2626"
+
+
+def money(x):
+    return f"₦{x:,.0f}"
+
+
+def bar(p, color):
+    w = 0 if p is None else min(100, max(0, round(p)))
+    fill = f'<td width="{w}%" style="background:{color};height:8px;line-height:8px;font-size:0;border-radius:4px">&nbsp;</td>' if w else ""
+    return (f'<table width="100%" cellpadding="0" cellspacing="0" style="background:{LINE};border-radius:4px"><tr>{fill}'
+            '<td style="height:8px;line-height:8px;font-size:0">&nbsp;</td></tr></table>')
+
+
+def pill(text, color):
+    return (f'<span style="display:inline-block;padding:3px 10px;border:1px solid {color};border-radius:999px;'
+            f'color:{color};font-size:12px;font-weight:600;white-space:nowrap">{text}</span>')
+
+
+def kpi(label, value, color=INK, sub="", p=None, first=False):
+    b = f'<div style="margin-top:10px">{bar(p, color)}</div>' if p is not None else ""
+    border = "" if first else f"border-left:1px solid {LINE};"
+    return (f'<td valign="top" style="padding:18px 20px;{border}">'
+            f'<div style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:{MUTED}">{label}</div>'
+            f'<div style="font-size:30px;font-weight:700;color:{color};margin-top:4px">{value}</div>{b}'
+            f'<div style="font-size:12px;color:{MUTED};margin-top:6px">{sub}</div></td>')
+
+
+def row(inner, pad="22px 28px", border=True, bg="#fff"):
+    top = f"border-top:1px solid {LINE};" if border else ""
+    return f'<tr><td style="background:{bg};padding:{pad};{top}">{inner}</td></tr>'
+
+
+def heading(text):
+    return f'<div style="font-size:13px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:{INK};margin-bottom:12px">{text}</div>'
+
+
+def table(head, rows):
+    th = "".join(f'<th align="{a}" style="padding:0 8px 8px;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:{MUTED};font-weight:600;border-bottom:2px solid {LINE}">{h}</th>'
+                 for h, a in head)
+    return f'<table width="100%" cellpadding="0" cellspacing="0" style="font-size:14px"><tr>{th}</tr>{"".join(rows)}</table>'
+
+
+def shell(title, sub, rows):
+    return (f'<!doctype html><html><body style="margin:0;background:#f1f5f9;font-family:Segoe UI,Helvetica,Arial,sans-serif;color:{INK}">'
+            '<table width="100%" cellpadding="0" cellspacing="0"><tr><td align="center" style="padding:24px 12px">'
+            '<table width="100%" cellpadding="0" cellspacing="0" style="max-width:640px">'
+            f'<tr><td style="background:{INK};border-radius:12px 12px 0 0;padding:26px 28px">'
+            f'<div style="font-size:24px;font-weight:700;color:#fff">{title}</div>'
+            f'<div style="font-size:13px;color:#94a3b8;margin-top:4px">{sub}</div></td></tr>'
+            f'{"".join(rows)}'
+            f'<tr><td style="background:#fff;border-top:1px solid {LINE};border-radius:0 0 12px 12px;padding:14px 28px;font-size:11px;color:{MUTED}">'
+            'Automated daily brief. Source: Zoho Books. Amounts in NGN.</td></tr>'
+            '</table></td></tr></table></body></html>')
+
+
+def status_pills(it):
+    p = pill("Never sent" if it["kind"] == "draft" else when(it["days"]).capitalize(), TIER_COLOR[it["tier"]])
+    return p + (" " + pill("Broken promise", "#dc2626") if it["broken"] else "")
+
+
+def action_table(items, with_rep=False):
+    rows = []
+    for i in sorted(items, key=lambda i: -i["days"]):
+        who = f" &middot; {esc(i['rep'])}" if with_rep else ""
+        rows.append(
+            f'<tr><td style="padding:12px 8px;border-left:4px solid {TIER_COLOR[i["tier"]]};border-bottom:1px solid {LINE}">'
+            f'<b>{esc(i["number"])}</b><br><span style="font-size:12px;color:{MUTED}">{esc(i["org"])}{who}</span></td>'
+            f'<td style="padding:12px 8px;border-bottom:1px solid {LINE}">{esc(i["client"])}</td>'
+            f'<td align="right" style="padding:12px 8px;border-bottom:1px solid {LINE}"><b>{money(i["balance"])}</b></td>'
+            f'<td align="right" style="padding:12px 8px;border-bottom:1px solid {LINE}">{status_pills(i)}</td></tr>')
+    return table([("Invoice", "left"), ("Client", "left"), ("Balance", "right"), ("Status", "right")], rows)
+
+
+def steps(texts):
+    out = []
+    for n, t in enumerate(texts, 1):
+        out.append(f'<tr><td width="36" valign="top" style="padding:6px 0"><div style="width:26px;height:26px;line-height:26px;border-radius:50%;'
+                   f'background:{INK};color:#fff;text-align:center;font-size:13px;font-weight:700">{n}</div></td>'
+                   f'<td style="padding:6px 0;font-size:14px;line-height:20px">{t}</td></tr>')
+    return f'<table cellpadding="0" cellspacing="0" width="100%">{"".join(out)}</table>'
+
+
+def html_rep(rep, items, stats, outst, oldest, today):
+    worst = max((i["tier"] for i in items), key=ORDER.index)
+    s, team = stats.get(rep), pct(stats.get("__team__"))
+    p = pct(s)
+    drafts = sum(1 for i in items if i["kind"] == "draft")
+    orgs = " &nbsp;&middot;&nbsp; ".join(f"{esc(o)} <b>{fp(pct(stats.get('org:' + o)))}</b>" for o in sorted({i["org"] for i in items}))
+    sub = f"{money(s[1])} of {money(s[0])} invoiced" if s else "Nothing invoiced yet"
+    kpis = ('<table width="100%" cellpadding="0" cellspacing="0"><tr>'
+            + kpi("Your collection rate", fp(p), rate_color(p), sub, p, first=True)
+            + kpi("Team rate", fp(team), rate_color(team), "All reps and unassigned", team)
+            + kpi("Outstanding", money(outst[rep]), INK, f"Oldest unpaid: {oldest[rep]}d") + '</tr></table>')
+    return shell("Collections brief", f"{today:%A, %d %B %Y} &nbsp;&middot;&nbsp; {esc(rep)}", [
+        row(f'<div style="border-left:4px solid {TIER_COLOR[worst]};padding:4px 14px;font-size:16px;line-height:24px">'
+            f'{esc(OPENERS[worst].format(n=rep.split()[0]))}</div>', border=False),
+        row(kpis, pad="0"),
+        row(f'<span style="font-size:12px;color:{MUTED}">Fiscal year to date (from {fy_start(today):%d %b %Y}) &nbsp;|&nbsp; Org rates: {orgs} &nbsp;|&nbsp; Drafts never sent: <b>{drafts}</b></span>',
+            pad="12px 28px", bg="#f8fafc"),
+        row(heading(f"Needs action ({len(items)})") + action_table(items)),
+        row(heading("What to do today") + steps([
+            "Call the clients above, <b>most overdue first</b>.",
+            "Send each draft invoice, or void it.",
+            "Log the outcome in the Follow-ups tab: <b>Chasing</b>, <b>Promised</b> (add the date) or <b>Dead</b>.",
+        ])),
+    ])
+
+
+def html_manager(items, stats, reps, today):
+    team = pct(stats.get("__team__"))
+    urgent = [i for i in items if ORDER.index(i["tier"]) >= ORDER.index("blunt")]
+    unas = [i for i in items if i["rep"] == UN]
+    hot = [i for i in items if i in urgent or i in unas]
+    orgs = " &nbsp;&middot;&nbsp; ".join(f"{esc(k[4:])} <b>{fp(pct(v))}</b>" for k, v in sorted(stats.items()) if k.startswith("org:"))
+    kpis = ('<table width="100%" cellpadding="0" cellspacing="0"><tr>'
+            + kpi("Team collection rate", fp(team), rate_color(team), "Fiscal year to date", team, first=True)
+            + kpi("Escalations", str(len(urgent)), "#dc2626" if urgent else "#16a34a", "14+ days overdue or broken promise")
+            + kpi("Unassigned", str(len(unas)), "#dc2626" if unas else "#16a34a", "No rep on the Clients tab") + '</tr></table>')
+    rep_rows = []
+    for r in reps:
+        p = pct(stats.get(r))
+        rep_rows.append(f'<tr><td style="padding:9px 8px;border-bottom:1px solid {LINE}">{esc(r)}</td>'
+                        f'<td width="45%" style="padding:9px 8px;border-bottom:1px solid {LINE}">{bar(p, rate_color(p))}</td>'
+                        f'<td align="right" style="padding:9px 8px;border-bottom:1px solid {LINE}"><b style="color:{rate_color(p)}">{fp(p)}</b></td></tr>')
+    esc_html = (action_table(hot, with_rep=True) if hot
+                else '<div style="color:#16a34a;font-weight:600">All clear. Nothing escalated.</div>')
+    return shell("Collections summary", f"{today:%A, %d %B %Y} &nbsp;&middot;&nbsp; Management", [
+        row(kpis, pad="0", border=False),
+        row(f'<span style="font-size:12px;color:{MUTED}">Org rates: {orgs}</span>', pad="12px 28px", bg="#f8fafc"),
+        row(heading("Collection rate by rep") + table([("Rep", "left"), ("", "left"), ("Rate", "right")], rep_rows)),
+        row(heading("Escalations and unassigned") + esc_html),
+    ])
 
 
 # ---------- IO ----------
@@ -216,21 +355,26 @@ def deliver(msgs, send):
     # never print bodies in CI: public-repo logs would expose client data
     show = not os.environ.get("GITHUB_ACTIONS")
     if not send:
-        for to, cc, subj, body in msgs:
+        for to, cc, subj, body, html in msgs:
             print(f"[DRY RUN] to={to} cc={cc} subject={subj}")
             if show:
                 print(body, "\n" + "-" * 60)
+                os.makedirs("preview", exist_ok=True)  # open in a browser to see the HTML email
+                path = f"preview/{to}.html"
+                open(path, "w", encoding="utf-8").write(html)
+                print("HTML preview:", path)
         print(f"{len(msgs)} message(s) prepared, none sent.")
         return
     user = os.environ["GMAIL_USER"]
     with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ssl.create_default_context()) as s:
         s.login(user, os.environ["GMAIL_APP_PASSWORD"])
-        for to, cc, subj, body in msgs:
+        for to, cc, subj, body, html in msgs:
             m = EmailMessage()
             m["From"], m["To"], m["Subject"] = user, to, subj
             if cc:
                 m["Cc"] = cc
-            m.set_content(body)
+            m.set_content(body)  # plain-text fallback
+            m.add_alternative(html, subtype="html")
             s.send_message(m)
     print(f"{len(msgs)} message(s) sent.")
 
@@ -300,10 +444,12 @@ def main():
             continue
         subj, body, escalate = compose_rep(rep, mine, stats, outst, oldest)
         boss = next((m for m in managers if m["Rep"].strip() == row["Manager"].strip()), managers[0] if managers else None)
-        msgs.append((row["Email"], boss["Email"] if escalate and boss else "", subj, body))
+        msgs.append((row["Email"], boss["Email"] if escalate and boss else "", subj, body,
+                     html_rep(rep, mine, stats, outst, oldest, today)))
     if managers:
         subj, body = compose_manager(items, stats, list(reps))
-        msgs += [(m["Email"], "", subj, body) for m in managers]
+        page = html_manager(items, stats, list(reps), today)
+        msgs += [(m["Email"], "", subj, body, page) for m in managers]
     deliver(msgs, os.environ.get("SEND") == "1")
 
 

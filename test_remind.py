@@ -1,7 +1,7 @@
 """Run: python test_remind.py  (no dependencies)"""
 from datetime import date
 
-from remind import UN, all_clients, build, client_list, compose_rep, is_workday, pct, rank, tier
+from remind import UN, all_clients, build, client_list, compose_rep, is_workday, pct, tier, html_rep
 
 TODAY = date(2026, 10, 6)  # a Tuesday
 
@@ -22,6 +22,8 @@ INVS = {"Org": [
     inv("I8", "B", "sent", 300, 300, "2026-10-01"),              # promised in future
     inv("I9", "B", "sent", 300, 300, "2026-10-01"),              # broken promise
     inv("I10", "Z", "sent", 100, 100, "2026-10-01"),             # unmapped client
+    inv("I11", "Z", "sent", 100, 100, "2026-10-05", due="2026-10-20"),  # raised yesterday, not due -> early
+    inv("I12", "Z", "sent", 100, 100, "2026-10-06", due="2026-10-20"),  # raised today -> tomorrow
 ]}
 REP_OF = {("org", "a"): "Ann", ("org", "b"): "Bob"}
 FOLLOW = {("org", "I7"): {"Status": "Dead"},
@@ -34,7 +36,7 @@ def run():
 
 
 def test_tiers():
-    assert [tier(x) for x in (0, 6, 7, 13, 14, 20, 21)] == ["coach", "coach", "firm", "firm", "blunt", "blunt", "decision"]
+    assert [tier(x) for x in (-1, 0, 6, 7, 13, 14, 20, 21)] == ["early", "coach", "coach", "firm", "firm", "blunt", "blunt", "decision"]
 
 
 def test_workday():
@@ -44,22 +46,19 @@ def test_workday():
 def test_items_and_followups():
     items, *_ = run()
     got = {i["number"]: i for i in items}
-    assert set(got) == {"I2", "I3", "I5", "I9", "I10"}           # I4 grace, I6 void, I7 dead, I8 promised
+    assert set(got) == {"I2", "I3", "I5", "I8", "I9", "I10", "I11"}  # I4 grace, I6 void, I7 dead, I12 raised today
     assert got["I2"]["tier"] == "blunt" and got["I5"]["tier"] == "coach"
     assert got["I9"]["broken"] and got["I9"]["tier"] == "blunt"  # broken promise bumps to blunt
+    assert got["I11"]["tier"] == "early" and got["I11"]["days"] < 0
+    assert not got["I8"]["broken"]                               # promised in future: still reminded, not broken
     assert got["I3"]["kind"] == "draft" and got["I10"]["rep"] == UN
 
 
 def test_rates():
     _, stats, outst, oldest = run()
-    assert pct(stats["Ann"]) == 1000 / (1000 + 1000) * 100       # I1 paid, I2 unpaid (drafts excluded)
+    assert pct(stats["Ann"]) == 1000 / 3000 * 100                # I1 paid; I2, I3, I4 unpaid (drafts count, void does not)
     assert pct(stats["__team__"]) is not None
     assert outst["Ann"] == 1000 and oldest["Ann"] == 14
-
-
-def test_rank_needs_min_invoices():
-    _, stats, *_ = run()
-    assert rank(stats, "Ann") is None                            # only 2 invoices in window
 
 
 def test_message_has_stats_and_tone():
@@ -114,6 +113,13 @@ def test_fetch_retries_timeouts_but_not_client_errors():
             assert len(calls) == 1                                   # 401 is not retried
     finally:
         urllib.request.urlopen, remind.time.sleep = real_open, real_sleep
+
+
+def test_html_escapes_and_renders():
+    invs = {"Org": [inv("X1", "<script>", "sent", 100, 100, "2026-10-01")]}
+    items, stats, outst, oldest = build(invs, {("org", "<script>"): "Ann"}, {}, TODAY)
+    page = html_rep("Ann", items, stats, outst, oldest, TODAY)
+    assert "<script>" not in page and "&lt;script&gt;" in page and "X1" in page
 
 
 if __name__ == "__main__":

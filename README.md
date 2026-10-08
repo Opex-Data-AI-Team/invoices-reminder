@@ -1,6 +1,6 @@
 # Collections reminders
 
-Weekday email digest to sales reps for unpaid or never-sent Zoho Books invoices, with collection stats and an escalating tone (coach, firm, blunt, decision). Zoho is read-only.
+Weekday email digest to sales reps for unpaid or never-sent Zoho Books invoices, with collection stats and an escalating tone. Reminders start the day after an invoice is raised (early, before it is due) and repeat daily until it is paid, then escalate once overdue (coach, firm, blunt, decision). A Promised follow-up does not pause them. Zoho is read-only.
 
 ## Setup
 1. Import `templates/*.csv` as tabs (Reps, Clients, Followups) of one Google Sheet, fill in real data, then File > Share > Publish each tab as CSV.
@@ -19,5 +19,5 @@ Tests: `python test_remind.py`
 ## Notes
 - The repo is private. Actions minutes count against the org's free 2,000 a month; this job uses roughly 1 minute per weekday run.
 - In CI the script never prints message bodies (only counts), so run local dry runs to review wording.
-- Collection rate = value paid / value invoiced, for non-draft, non-void invoices dated in the last 30 days. Team includes unassigned clients; reps do not. Rank needs at least 3 invoices.
+- Collection rate = value paid / value invoiced, for all non-void invoices (drafts included) dated in the current fiscal year (starts month `FY_START_MONTH` in `remind.py`, default January). Team includes unassigned clients; reps do not.
 - Amounts are assumed to be NGN, with no currency conversion.
