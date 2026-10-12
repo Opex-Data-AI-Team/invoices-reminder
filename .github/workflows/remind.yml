@@ -1,7 +1,7 @@
 name: remind
 on:
   schedule:
-    - cron: "0 7 * * 1-5" # 07:00 UTC = 08:00 Lagos, Mon-Fri
+    - cron: "0 8 * * 1-5" # 08:00 UTC = 09:00 Lagos, Mon-Fri
   workflow_dispatch:
     inputs:
       send:
