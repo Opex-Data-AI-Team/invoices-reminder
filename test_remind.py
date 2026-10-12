@@ -54,6 +54,13 @@ def test_items_and_followups():
     assert got["I3"]["kind"] == "draft" and got["I10"]["rep"] == UN
 
 
+def test_salesperson_beats_clients_tab():
+    a = inv("S1", "A", "sent", 10, 10, "2026-10-01")
+    a["salesperson_name"] = "Cy"
+    items, *_ = build({"Org": [a, inv("S2", "A", "sent", 10, 10, "2026-10-01")]}, REP_OF, {}, TODAY)
+    assert {i["number"]: i["rep"] for i in items} == {"S1": "Cy", "S2": "Ann"}  # blank -> Clients tab
+
+
 def test_rates():
     _, stats, outst, oldest = run()
     assert pct(stats["Ann"]) == 1000 / 3000 * 100                # I1 paid; I2, I3, I4 unpaid (drafts count, void does not)

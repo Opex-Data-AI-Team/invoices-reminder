@@ -74,7 +74,7 @@ def build(invs_by_org, rep_of, follow, today):
             kind = classify(i)
             if kind == "void":
                 continue
-            rep = rep_of.get((org.lower(), i["customer_name"].strip().lower()), UN)
+            rep = (i.get("salesperson_name") or "").strip() or rep_of.get((org.lower(), i["customer_name"].strip().lower()), UN)
             if d(i["date"]) >= fy_start(today):
                 for k in (rep, "__team__", "org:" + org):
                     s = stats[k]
