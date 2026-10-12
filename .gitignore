@@ -221,3 +221,4 @@ __marimo__/
 
 # Local HTML email previews (contain client data)
 preview/
+fixture.json
