@@ -57,8 +57,15 @@ def test_items_and_followups():
 def test_salesperson_beats_clients_tab():
     a = inv("S1", "A", "sent", 10, 10, "2026-10-01")
     a["salesperson_name"] = "Cy"
-    items, *_ = build({"Org": [a, inv("S2", "A", "sent", 10, 10, "2026-10-01")]}, REP_OF, {}, TODAY)
+    items, *_ = build({"Org": [a, inv("S2", "A", "sent", 10, 10, "2026-10-01")]}, REP_OF, {}, TODAY, ["Cy", "Ann"])
     assert {i["number"]: i["rep"] for i in items} == {"S1": "Cy", "S2": "Ann"}  # blank -> Clients tab
+
+
+def test_unknown_salesperson_not_dropped():
+    a, z = inv("U1", "A", "sent", 10, 10, "2026-10-01"), inv("U2", "Z", "sent", 10, 10, "2026-10-01")
+    a["salesperson_name"] = z["salesperson_name"] = "Cy Smith"  # not on the Reps tab
+    items, *_ = build({"Org": [a, z]}, REP_OF, {}, TODAY, ["Cy", "Ann"])
+    assert {i["number"]: i["rep"] for i in items} == {"U1": "Ann", "U2": UN}  # Clients tab, else unassigned
 
 
 def test_rates():

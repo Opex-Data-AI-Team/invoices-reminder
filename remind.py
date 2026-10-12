@@ -65,7 +65,8 @@ def classify(inv):
     return "paid" if st == "paid" or inv["balance"] <= 0 else "open"
 
 
-def build(invs_by_org, rep_of, follow, today):
+def build(invs_by_org, rep_of, follow, today, reps=None):
+    known = {r.lower(): r for r in reps} if reps is not None else None  # None: trust Zoho salesperson as-is
     items = []
     stats = defaultdict(lambda: [0.0, 0.0, 0])  # key -> [invoiced, paid, count]
     outst, oldest = defaultdict(float), defaultdict(int)
@@ -74,7 +75,10 @@ def build(invs_by_org, rep_of, follow, today):
             kind = classify(i)
             if kind == "void":
                 continue
-            rep = (i.get("salesperson_name") or "").strip() or rep_of.get((org.lower(), i["customer_name"].strip().lower()), UN)
+            sp = (i.get("salesperson_name") or "").strip()
+            if known is not None:  # unknown salesperson falls back to Clients tab, else unassigned (never silently dropped)
+                sp = known.get(sp.lower(), "")
+            rep = sp or rep_of.get((org.lower(), i["customer_name"].strip().lower()), UN)
             if d(i["date"]) >= fy_start(today):
                 for k in (rep, "__team__", "org:" + org):
                     s = stats[k]
@@ -436,7 +440,7 @@ def main():
     managers = [r for r in reps_rows if r["Role"].strip() == "manager"]
     rep_of = {(c["Organization"].strip().lower(), c["Client name"].strip().lower()): c["Rep"].strip()
               for c in clients if c["Rep"].strip() in reps}
-    items, stats, outst, oldest = build(invs, rep_of, follow, today)
+    items, stats, outst, oldest = build(invs, rep_of, follow, today, reps)
     msgs = []
     for rep, row in reps.items():
         mine = [i for i in items if i["rep"] == rep]
