@@ -561,6 +561,14 @@ def diagnose(invs, reps_rows, clients, follow, reps, rep_of, items):
            "| salesperson_name set on:", sum(1 for i in lst if (i.get("salesperson_name") or "").strip()))
         seen |= {(org.lower(), i["customer_name"].strip().lower()) for i in lst if classify(i) in ("open", "draft")}
     pr("Emailable items by rep:", dict(Counter(i["rep"] for i in items)))
+    pr("Items by rep and kind (open / recent draft / stale draft):",
+       {r: (sum(1 for i in items if i["rep"] == r and i["kind"] != "draft"),
+            sum(1 for i in items if i["rep"] == r and i["kind"] == "draft" and i["days"] < STALE_DRAFT_DAYS),
+            sum(1 for i in items if i["rep"] == r and i["kind"] == "draft" and i["days"] >= STALE_DRAFT_DAYS)) for r in sorted({i["rep"] for i in items})})
+    pr("Open invoices (client | rep | days overdue | tier | has link):",
+       [(i["client"], i["rep"], i["days"], i["tier"], bool(i["url"])) for i in items if i["kind"] != "draft"])
+    page = html_manager(items, {}, list(reps), datetime.now(WAT).date())
+    pr("Manager HTML: invoice hyperlinks present:", page.count("zohosecurepay.com"))
     pr("Unassigned clients (open/draft items):", sorted({i["client"] for i in items if i["rep"] == UN})[:25])
     pr("Clients-tab rows that match no open/draft invoice:", sorted({c.get("Client name", "").strip() for c in clients
                                                                     if (c.get("Organization", "").strip().lower(), c.get("Client name", "").strip().lower()) not in seen})[:25])
