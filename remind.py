@@ -546,6 +546,26 @@ def emit(rows):
             f.write("```csv\n" + buf.getvalue() + "```\n")
 
 
+def diagnose(invs, reps_rows, clients, follow, reps, rep_of, items):
+    """DIAGNOSE=1: explain who gets what. Counts and names only, no amounts, no emails sent."""
+    from collections import Counter
+    pr = print
+    pr("Reps tab columns:", list(reps_rows[0]) if reps_rows else "EMPTY")
+    pr("Reps tab roles:", dict(Counter(r.get("Role", "?").strip() for r in reps_rows)), "| reps used:", len(reps))
+    pr("Clients tab columns:", list(clients[0]) if clients else "EMPTY", "| rows:", len(clients), "| mapped to a known rep:", len(rep_of))
+    pr("Clients tab Organization values:", dict(Counter(c.get("Organization", "").strip() for c in clients)))
+    pr("Followups rows:", len(follow))
+    seen = set()
+    for org, lst in invs.items():
+        pr(f"Org '{org}': invoices by (kind, has invoice_url):", dict(Counter((classify(i), bool((i.get("invoice_url") or "").strip())) for i in lst)),
+           "| salesperson_name set on:", sum(1 for i in lst if (i.get("salesperson_name") or "").strip()))
+        seen |= {(org.lower(), i["customer_name"].strip().lower()) for i in lst if classify(i) in ("open", "draft")}
+    pr("Emailable items by rep:", dict(Counter(i["rep"] for i in items)))
+    pr("Unassigned clients (open/draft items):", sorted({i["client"] for i in items if i["rep"] == UN})[:25])
+    pr("Clients-tab rows that match no open/draft invoice:", sorted({c.get("Client name", "").strip() for c in clients
+                                                                    if (c.get("Organization", "").strip().lower(), c.get("Client name", "").strip().lower()) not in seen})[:25])
+
+
 def main():
     today = datetime.now(WAT).date()
     if not is_workday(today) and not os.environ.get("FORCE"):
@@ -569,6 +589,8 @@ def main():
     rep_of = {(c["Organization"].strip().lower(), c["Client name"].strip().lower()): c["Rep"].strip()
               for c in clients if c["Rep"].strip() in reps}
     items, stats, outst, oldest = build(invs, rep_of, follow, today, reps)
+    if os.environ.get("DIAGNOSE") == "1":
+        return diagnose(invs, reps_rows, clients, follow, reps, rep_of, items)
     url, secret = os.environ.get("APPS_SCRIPT_URL"), os.environ.get("LINK_SECRET")
     if url and secret:
         add_links(items, url, secret, today)

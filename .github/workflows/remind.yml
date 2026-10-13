@@ -7,6 +7,9 @@ on:
       send:
         description: "1 = really send, 0 = dry run"
         default: "0"
+      diagnose:
+        description: "1 = print who gets what (counts and client names only), send nothing"
+        default: "0"
       list_clients:
         description: "1 = list clients with unpaid or draft invoices (Clients tab); all = every client on any invoice (Client, Region, Rep sheet)"
         default: "0"
@@ -21,6 +24,7 @@ jobs:
         env:
           SEND: ${{ inputs.send || vars.SEND }} # repo variable SEND=1 turns on real sending
           LIST_CLIENTS: ${{ inputs.list_clients }}
+          DIAGNOSE: ${{ inputs.diagnose }}
           FORCE: ${{ github.event_name == 'workflow_dispatch' && '1' || '' }} # manual runs ignore the weekend rule
           ZOHO_ORGS: ${{ vars.ZOHO_ORGS }} # e.g. Regtech=894826960,OPEX Consulting=790222018
           REPS_SRC: ${{ secrets.REPS_SRC }}
