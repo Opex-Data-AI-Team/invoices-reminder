@@ -551,6 +551,10 @@ def diagnose(invs, reps_rows, clients, follow, reps, rep_of, items):
     """DIAGNOSE=1: explain who gets what. Counts and names only, no amounts, no emails sent."""
     from collections import Counter
     pr = print
+    sec, u = os.environ.get("LINK_SECRET", ""), os.environ.get("APPS_SCRIPT_URL", "")
+    pr("LINK_SECRET set:", bool(sec), "| length:", len(sec), "| fingerprint:", hashlib.sha256(sec.encode()).hexdigest()[:8] if sec else "-",
+       "| has surrounding whitespace:", sec != sec.strip())
+    pr("APPS_SCRIPT_URL host/path shape:", urllib.parse.urlparse(u.strip()).netloc, "/".join(p[:6] for p in urllib.parse.urlparse(u.strip()).path.split("/")), "| contains /u/:", "/u/" in u)
     pr("Reps tab columns:", list(reps_rows[0]) if reps_rows else "EMPTY")
     pr("Reps tab roles:", dict(Counter(r.get("Role", "?").strip() for r in reps_rows)), "| reps used:", len(reps))
     pr("Clients tab columns:", list(clients[0]) if clients else "EMPTY", "| rows:", len(clients), "| mapped to a known rep:", len(rep_of))

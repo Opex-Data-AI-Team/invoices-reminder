@@ -51,6 +51,11 @@ function page_(html) {
 }
 
 function doGet(e) {
+  if (e && e.parameter && e.parameter.diag === '1') { // temporary: compare with the GitHub LINK_SECRET fingerprint, then remove
+    var sec = prop_('LINK_SECRET');
+    return ContentService.createTextOutput(JSON.stringify({ set: !!sec, len: sec.length,
+      fp: sec ? hex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, sec)).slice(0, 8) : '-', ws: sec !== sec.trim() }));
+  }
   var p = verifyToken_(e && e.parameter && e.parameter.t);
   if (!p) return page_('<body style="font-family:sans-serif;padding:24px"><h3>Link invalid or expired</h3>' +
     '<p>Use the link in today\'s collections email.</p></body>');
