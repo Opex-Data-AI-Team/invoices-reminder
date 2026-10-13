@@ -228,6 +228,7 @@ def compose_manager(items, stats, reps, today=None):
 # ---------- HTML email (inline styles only: email clients ignore <style>/external CSS) ----------
 TIER_COLOR = {"early": "#0d9488", "coach": "#2563eb", "firm": "#d97706", "blunt": "#ea580c", "decision": "#dc2626"}
 INK, MUTED, LINE = "#0f172a", "#64748b", "#e2e8f0"
+LINK = "#2563eb"  # same blue as the "coach" tier, so links read as links without adding a new colour
 
 
 def rate_color(p):  # green >= 75%, amber >= 50%, red below
@@ -305,7 +306,7 @@ def action_table(items, with_rep=False, links=True, keep_order=False):
         who += f" &middot; by {esc(i['created_by'])}" if with_rep and i["kind"] == "draft" and i["created_by"] else ""
         num = f'<b>{esc(i["number"])}</b>'
         if i.get("url"):  # client-facing page: opens without a Zoho login
-            num = f'<a href="{esc(i["url"])}" style="color:{INK};text-decoration:underline">{num}</a>'
+            num = f'<a href="{esc(i["url"])}" style="color:{LINK};text-decoration:underline">{num}</a>'
         color = "#94a3b8" if i["kind"] == "draft" else TIER_COLOR[i["tier"]]
         rows.append(
             f'<tr><td style="padding:12px 8px;border-left:4px solid {color};border-bottom:1px solid {LINE}">'
