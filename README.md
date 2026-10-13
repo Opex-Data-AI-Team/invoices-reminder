@@ -19,5 +19,5 @@ Tests: `python test_remind.py`
 ## Notes
 - The repo is private. Actions minutes count against the org's free 2,000 a month; this job uses roughly 1 minute per weekday run.
 - In CI the script never prints message bodies (only counts), so run local dry runs to review wording.
-- Collection rate = value paid / value invoiced, for all non-void invoices (drafts included) dated in the current fiscal year (starts month `FY_START_MONTH` in `remind.py`, default January). Team includes unassigned clients; reps do not.
+- Collection rate = value paid / value invoiced, for all issued, non-void invoices dated in the current fiscal year (starts month `FY_START_MONTH` in `remind.py`, default January). Team includes unassigned clients; reps do not. Drafts are **not** in the rate: they are unbilled pipeline, shown separately in the manager summary and stored in the `Opportunities` tab (never voided; they are candidates for win-back and upsell).
 - Amounts are assumed to be NGN, with no currency conversion.

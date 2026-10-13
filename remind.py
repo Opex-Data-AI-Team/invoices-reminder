@@ -3,7 +3,10 @@
 Zoho is the source of truth; reps/clients/follow-ups come from a Google Sheet (CSV).
 Dry run by default: set SEND=1 to really send.
 """
+import base64
 import csv
+import hashlib
+import hmac
 import io
 import json
 import os
@@ -23,6 +26,10 @@ API = "https://www.zohoapis.com/books/v3"  # US data centre
 TOKEN_URL = "https://accounts.zoho.com/oauth/v2/token"
 FY_START_MONTH = 1  # fiscal year start (1 = calendar year); collection rate runs from here to today
 DRAFT_GRACE = 3  # days before a never-sent draft is flagged
+STALE_DRAFT_DAYS = 30  # older drafts leave the daily emails; finance gets them in a weekly (Monday) list
+STALE_LIST_MAX = 40  # cap on the Monday dormant-opportunity list
+LINK_DAYS = 14  # how long a "Log update" link stays valid
+DEFAULT_SEND_CAP = 400  # abort a run that would send more than this (Gmail allows ~500/day on free accounts)
 UN = "(unassigned)"
 TIERS = [(21, "decision"), (14, "blunt"), (7, "firm"), (0, "coach")]
 OPENERS = {
@@ -30,7 +37,8 @@ OPENERS = {
     "coach": "{n}, a quick nudge on your open invoices.",
     "firm": "{n}, some invoices are a week or more overdue. We need movement today.",
     "blunt": "{n}. Money is sitting uncollected. Chase it today and log the result, no excuses.",
-    "decision": "{n}, an invoice is 21+ days overdue. Decide today: collect, void or write off, and log it.",
+    "decision": "{n}, an invoice is 21+ days overdue. Decide today: collect it or escalate it to management, and log it.",
+    "drafts": "{n}, some invoices for your clients have not been billed yet. Finance has to issue them; you cannot fix them in Zoho.",
 }
 ORDER = ["early", "coach", "firm", "blunt", "decision"]
 
@@ -79,7 +87,10 @@ def build(invs_by_org, rep_of, follow, today, reps=None):
             if known is not None:  # unknown salesperson falls back to Clients tab, else unassigned (never silently dropped)
                 sp = known.get(sp.lower(), "")
             rep = sp or rep_of.get((org.lower(), i["customer_name"].strip().lower()), UN)
-            if d(i["date"]) >= fy_start(today):
+            if kind == "draft":  # unbilled: not in the collection rate, tracked as pipeline instead
+                stats["__drafts__"][0] += i["total"]
+                stats["__drafts__"][2] += 1
+            elif d(i["date"]) >= fy_start(today):
                 for k in (rep, "__team__", "org:" + org):
                     s = stats[k]
                     s[0] += i["total"]
@@ -99,6 +110,7 @@ def build(invs_by_org, rep_of, follow, today, reps=None):
                     continue
             fu = follow.get((org.lower(), i["invoice_number"]), {})
             status = (fu.get("Status") or "").strip().lower()
+            urgent = status == "client waiting"
             promised = (fu.get("Promised pay date") or "").strip()
             broken = False
             if status == "dead":
@@ -110,7 +122,8 @@ def build(invs_by_org, rep_of, follow, today, reps=None):
                 t = "blunt"
             items.append(dict(rep=rep, org=org, number=i["invoice_number"], client=i["customer_name"],
                               balance=i["balance"], kind=kind, days=days, tier=t, broken=broken,
-                              note=fu.get("Rep note", "")))
+                              note=fu.get("Rep note", ""), urgent=urgent, created_by=(i.get("created_by") or "").strip(),
+                              url=(i.get("invoice_url") or "").strip()))
     return items, stats, outst, oldest
 
 
@@ -122,14 +135,34 @@ def fp(p):
     return "n/a" if p is None else f"{p:.0f}%"
 
 
+def split(items):
+    """-> (open invoices, recent drafts, stale drafts). Drafts are finance's job, so reps only see recent ones."""
+    drafts = [i for i in items if i["kind"] == "draft"]
+    return ([i for i in items if i["kind"] != "draft"],
+            [i for i in drafts if i["days"] < STALE_DRAFT_DAYS], [i for i in drafts if i["days"] >= STALE_DRAFT_DAYS])
+
+
+def pipeline(stats, money_fmt):
+    """Drafts are unbilled opportunities, never voided: shown beside the collection rate, not inside it."""
+    s = stats.get("__drafts__")
+    return f"Unbilled pipeline: {money_fmt(s[0])} in {s[2]} drafts (kept, never voided)" if s else "Unbilled pipeline: none"
+
+
 def when(days):
     return f"due in {-days}d" if days < 0 else "due today" if days == 0 else f"{days}d overdue"
 
 
-def line(it):
-    what = "NEVER SENT (draft)" if it["kind"] == "draft" else when(it["days"])
+def line(it, links=True):
+    draft = it["kind"] == "draft"
+    what = f"NOT YET BILLED (draft, {it['days']}d old)" if draft else when(it["days"])
     extra = "  ** BROKEN PROMISE **" if it["broken"] else ""
-    return f"- {it['org']} {it['number']} {it['client']}: NGN {it['balance']:,.0f}, {what}{extra}"
+    extra += "  ** CLIENT WAITING **" if it["urgent"] else ""
+    out = f"- {it['org']} {it['number']} {it['client']}: NGN {it['balance']:,.0f}, {what}{extra}"
+    if links and it.get("url"):
+        out += f"\n    View: {it['url']}"
+    if links and it.get("link") and not it["urgent"]:
+        out += f"\n    {'Client is waiting' if draft else 'Update'}: {it['link']}"
+    return out
 
 
 def stats_block(rep, items, stats, outst, oldest):
@@ -139,31 +172,55 @@ def stats_block(rep, items, stats, outst, oldest):
         else "Your fiscal-year collection rate: n/a (nothing invoiced this fiscal year)",
         f"Team collection rate: {fp(pct(stats.get('__team__')))}",
         "Org rates: " + (", ".join(f"{o} {fp(pct(stats.get('org:' + o)))}" for o in orgs) or "n/a"),
-        f"Your outstanding: NGN {outst[rep]:,.0f}   Oldest unpaid: {oldest[rep]}d   Drafts never sent: {sum(1 for i in items if i['kind'] == 'draft')}",
+        f"Your outstanding: NGN {outst[rep]:,.0f}   Oldest unpaid: {oldest[rep]}d   Drafts awaiting billing: {sum(1 for i in items if i['kind'] == 'draft')}",
     ]
     return "\n".join(lines)
 
 
 def compose_rep(rep, items, stats, outst, oldest):
-    worst = max((i["tier"] for i in items), key=ORDER.index)
+    open_, drafts, _ = split(items)
+    worst = max((i["tier"] for i in open_), key=ORDER.index) if open_ else None
     first = rep.split()[0]
-    body = "\n".join([
-        OPENERS[worst].format(n=first), "",
-        stats_block(rep, items, stats, outst, oldest), "",
-        "Needs action:", *[line(i) for i in sorted(items, key=lambda i: -i["days"])], "",
-        "Log it in the Follow-ups tab: Status = Chasing / Promised (+ date) / Dead.",
-    ])
-    return f"Collections: {len(items)} invoice(s) need you today", body, ORDER.index(worst) >= ORDER.index("blunt")
+    parts = [(OPENERS[worst] if worst else OPENERS["drafts"]).format(n=first), "", stats_block(rep, items, stats, outst, oldest), ""]
+    if open_:
+        parts += ["Needs action:", *[line(i) for i in sorted(open_, key=lambda i: -i["days"])], "",
+                  "Tap Update under an invoice to log it: Chasing / Promised (+ date) / Paid / Disputed / Paused."
+                  if any(i.get("link") for i in open_) else
+                  "Log it in the Follow-ups tab: Status = Chasing / Promised (+ date) / Dead."]
+    if drafts:
+        parts += ["", "Waiting on billing (finance issues these; nothing for you to fix):",
+                  *[line(i) for i in sorted(drafts, key=lambda i: -i["days"])]]
+        if any(i.get("link") for i in drafts):
+            parts += ["If a client is expecting one, tap Client is waiting so finance prioritises it."]
+    subj = f"Collections: {len(open_)} invoice(s) need you today" if open_ else f"Collections: {len(drafts)} invoice(s) waiting on billing"
+    return subj, "\n".join(parts), bool(worst) and ORDER.index(worst) >= ORDER.index("blunt")
 
 
-def compose_manager(items, stats, reps):
+def draft_sections(items, today):
+    """Finance/manager view of drafts: recent ones (urgent first), plus the stale list on Mondays only."""
+    _, recent, stale = split(items)
+    recent = sorted(recent, key=lambda i: (not i["urgent"], -i["days"]))
+    stale = sorted(stale, key=lambda i: -i["balance"])  # biggest opportunity first; stale drafts are never voided
+    show_stale = today is not None and today.weekday() == 0
+    return recent, stale, (stale[:STALE_LIST_MAX] if show_stale else [])
+
+
+def compose_manager(items, stats, reps, today=None):
     rows = [f"- {r}: rate {fp(pct(stats.get(r)))}" for r in reps]
-    hot = [i for i in items if ORDER.index(i["tier"]) >= ORDER.index("blunt") or i["rep"] == UN]
+    open_ = [i for i in items if i["kind"] != "draft"]
+    hot = [i for i in open_ if ORDER.index(i["tier"]) >= ORDER.index("blunt") or i["rep"] == UN]
+    recent, stale, stale_shown = draft_sections(items, today)
+    dline = lambda i: f"- ({i['rep']}, by {i['created_by'] or '?'}) " + line(i, links=False)[2:]  # noqa: E731
     body = "\n".join([
         f"Team collection rate (fiscal year): {fp(pct(stats.get('__team__')))}",
+        pipeline(stats, lambda x: f"NGN {x:,.0f}"),
         "By rep:", *rows, "",
         "Orgs: " + ", ".join(f"{k[4:]} {fp(pct(v))}" for k, v in sorted(stats.items()) if k.startswith("org:")), "",
-        "Escalations / unassigned:", *([f"- ({i['rep']}, {i['tier']}) " + line(i)[2:] for i in hot] or ["- none"]),
+        "Escalations / unassigned:", *([f"- ({i['rep']}, {i['tier']}) " + line(i, links=False)[2:] for i in hot] or ["- none"]), "",
+        f"Drafts for finance to issue ({len(recent)}; client-waiting first):", *([dline(i) for i in recent] or ["- none"]), "",
+        (f"Dormant opportunities, drafts {STALE_DRAFT_DAYS}+ days old (top {len(stale_shown)} of {len(stale)} by value; keep, never void, win these clients back):" if stale_shown
+         else f"Dormant opportunities ({STALE_DRAFT_DAYS}+ days old drafts): {len(stale)}, listed every Monday."),
+        *[dline(i) for i in stale_shown],
     ])
     return "Collections: manager summary", body
 
@@ -230,21 +287,32 @@ def shell(title, sub, rows):
             '</table></td></tr></table></body></html>')
 
 
-def status_pills(it):
-    p = pill("Never sent" if it["kind"] == "draft" else when(it["days"]).capitalize(), TIER_COLOR[it["tier"]])
-    return p + (" " + pill("Broken promise", "#dc2626") if it["broken"] else "")
+def status_pills(it, links=True):
+    draft = it["kind"] == "draft"
+    p = pill(f"Not yet billed ({it['days']}d)" if draft else when(it["days"]).capitalize(), "#64748b" if draft else TIER_COLOR[it["tier"]])
+    p += " " + pill("Broken promise", "#dc2626") if it["broken"] else ""
+    p += " " + pill("Client waiting", "#d97706") if it["urgent"] else ""
+    if links and it.get("link") and not it["urgent"]:
+        p += (f'<br><a href="{esc(it["link"])}" style="display:inline-block;margin-top:8px;padding:6px 12px;background:{INK};'
+              f'color:#fff;border-radius:6px;font-size:12px;font-weight:600;text-decoration:none">{"Client is waiting" if draft else "Log update"}</a>')
+    return p
 
 
-def action_table(items, with_rep=False):
+def action_table(items, with_rep=False, links=True, keep_order=False):
     rows = []
-    for i in sorted(items, key=lambda i: -i["days"]):
+    for i in (items if keep_order else sorted(items, key=lambda i: -i["days"])):
         who = f" &middot; {esc(i['rep'])}" if with_rep else ""
+        who += f" &middot; by {esc(i['created_by'])}" if with_rep and i["kind"] == "draft" and i["created_by"] else ""
+        num = f'<b>{esc(i["number"])}</b>'
+        if i.get("url"):  # client-facing page: opens without a Zoho login
+            num = f'<a href="{esc(i["url"])}" style="color:{INK};text-decoration:underline">{num}</a>'
+        color = "#94a3b8" if i["kind"] == "draft" else TIER_COLOR[i["tier"]]
         rows.append(
-            f'<tr><td style="padding:12px 8px;border-left:4px solid {TIER_COLOR[i["tier"]]};border-bottom:1px solid {LINE}">'
-            f'<b>{esc(i["number"])}</b><br><span style="font-size:12px;color:{MUTED}">{esc(i["org"])}{who}</span></td>'
+            f'<tr><td style="padding:12px 8px;border-left:4px solid {color};border-bottom:1px solid {LINE}">'
+            f'{num}<br><span style="font-size:12px;color:{MUTED}">{esc(i["org"])}{who}</span></td>'
             f'<td style="padding:12px 8px;border-bottom:1px solid {LINE}">{esc(i["client"])}</td>'
             f'<td align="right" style="padding:12px 8px;border-bottom:1px solid {LINE}"><b>{money(i["balance"])}</b></td>'
-            f'<td align="right" style="padding:12px 8px;border-bottom:1px solid {LINE}">{status_pills(i)}</td></tr>')
+            f'<td align="right" style="padding:12px 8px;border-bottom:1px solid {LINE}">{status_pills(i, links)}</td></tr>')
     return table([("Invoice", "left"), ("Client", "left"), ("Balance", "right"), ("Status", "right")], rows)
 
 
@@ -258,10 +326,10 @@ def steps(texts):
 
 
 def html_rep(rep, items, stats, outst, oldest, today):
-    worst = max((i["tier"] for i in items), key=ORDER.index)
+    open_, drafts, _ = split(items)
+    worst = max((i["tier"] for i in open_), key=ORDER.index) if open_ else None
     s, team = stats.get(rep), pct(stats.get("__team__"))
     p = pct(s)
-    drafts = sum(1 for i in items if i["kind"] == "draft")
     orgs = " &nbsp;&middot;&nbsp; ".join(f"{esc(o)} <b>{fp(pct(stats.get('org:' + o)))}</b>" for o in sorted({i["org"] for i in items}))
     sub = f"{money(s[1])} of {money(s[0])} invoiced" if s else "Nothing invoiced yet"
     kpis = ('<table width="100%" cellpadding="0" cellspacing="0"><tr>'
@@ -269,25 +337,29 @@ def html_rep(rep, items, stats, outst, oldest, today):
             + kpi("Team rate", fp(team), rate_color(team), "All reps and unassigned", team)
             + kpi("Outstanding", money(outst[rep]), INK, f"Oldest unpaid: {oldest[rep]}d") + '</tr></table>')
     return shell("Collections brief", f"{today:%A, %d %B %Y} &nbsp;&middot;&nbsp; {esc(rep)}", [
-        row(f'<div style="border-left:4px solid {TIER_COLOR[worst]};padding:4px 14px;font-size:16px;line-height:24px">'
-            f'{esc(OPENERS[worst].format(n=rep.split()[0]))}</div>', border=False),
+        row(f'<div style="border-left:4px solid {TIER_COLOR[worst or "coach"]};padding:4px 14px;font-size:16px;line-height:24px">'
+            f'{esc((OPENERS[worst] if worst else OPENERS["drafts"]).format(n=rep.split()[0]))}</div>', border=False),
         row(kpis, pad="0"),
-        row(f'<span style="font-size:12px;color:{MUTED}">Fiscal year to date (from {fy_start(today):%d %b %Y}) &nbsp;|&nbsp; Org rates: {orgs} &nbsp;|&nbsp; Drafts never sent: <b>{drafts}</b></span>',
+        row(f'<span style="font-size:12px;color:{MUTED}">Fiscal year to date (from {fy_start(today):%d %b %Y}) &nbsp;|&nbsp; Org rates: {orgs} &nbsp;|&nbsp; Drafts awaiting billing: <b>{len(drafts)}</b></span>',
             pad="12px 28px", bg="#f8fafc"),
-        row(heading(f"Needs action ({len(items)})") + action_table(items)),
-        row(heading("What to do today") + steps([
-            "Call the clients above, <b>most overdue first</b>.",
-            "Send each draft invoice, or void it.",
-            "Log the outcome in the Follow-ups tab: <b>Chasing</b>, <b>Promised</b> (add the date) or <b>Dead</b>.",
-        ])),
+        *([row(heading(f"Needs action ({len(open_)})") + action_table(open_)),
+           row(heading("What to do today") + steps([
+               "Call the clients above, <b>most overdue first</b>. Tap an invoice number to see the invoice and forward it to the client.",
+               "Log the outcome with <b>Log update</b>: Chasing, Promised (add the date), Paid, Disputed or Paused.",
+           ]))] if open_ else []),
+        *([row(heading(f"Waiting on billing ({len(drafts)})")
+               + f'<div style="font-size:13px;color:{MUTED};margin-bottom:10px">Finance issues these. Nothing for you to fix; tap <b>Client is waiting</b> if the client is expecting one.</div>'
+               + action_table(drafts))] if drafts else []),
     ])
 
 
 def html_manager(items, stats, reps, today):
     team = pct(stats.get("__team__"))
-    urgent = [i for i in items if ORDER.index(i["tier"]) >= ORDER.index("blunt")]
-    unas = [i for i in items if i["rep"] == UN]
-    hot = [i for i in items if i in urgent or i in unas]
+    open_ = [i for i in items if i["kind"] != "draft"]
+    urgent = [i for i in open_ if ORDER.index(i["tier"]) >= ORDER.index("blunt")]
+    unas = [i for i in open_ if i["rep"] == UN]
+    hot = [i for i in open_ if i in urgent or i in unas]
+    recent, stale, stale_shown = draft_sections(items, today)
     orgs = " &nbsp;&middot;&nbsp; ".join(f"{esc(k[4:])} <b>{fp(pct(v))}</b>" for k, v in sorted(stats.items()) if k.startswith("org:"))
     kpis = ('<table width="100%" cellpadding="0" cellspacing="0"><tr>'
             + kpi("Team collection rate", fp(team), rate_color(team), "Fiscal year to date", team, first=True)
@@ -299,14 +371,70 @@ def html_manager(items, stats, reps, today):
         rep_rows.append(f'<tr><td style="padding:9px 8px;border-bottom:1px solid {LINE}">{esc(r)}</td>'
                         f'<td width="45%" style="padding:9px 8px;border-bottom:1px solid {LINE}">{bar(p, rate_color(p))}</td>'
                         f'<td align="right" style="padding:9px 8px;border-bottom:1px solid {LINE}"><b style="color:{rate_color(p)}">{fp(p)}</b></td></tr>')
-    esc_html = (action_table(hot, with_rep=True) if hot
+    esc_html = (action_table(hot, with_rep=True, links=False) if hot
                 else '<div style="color:#16a34a;font-weight:600">All clear. Nothing escalated.</div>')
+    note = lambda t: f'<div style="font-size:13px;color:{MUTED};margin-bottom:10px">{t}</div>'  # noqa: E731
+    stale_note = (f"Top {len(stale_shown)} of {len(stale)} by value. Keep every draft: each is a client to win back with the original or a better-fitting offer." if stale_shown
+                  else f"{len(stale)} drafts are {STALE_DRAFT_DAYS}+ days old. The top ones by value are listed every Monday.")
     return shell("Collections summary", f"{today:%A, %d %B %Y} &nbsp;&middot;&nbsp; Management", [
         row(kpis, pad="0", border=False),
-        row(f'<span style="font-size:12px;color:{MUTED}">Org rates: {orgs}</span>', pad="12px 28px", bg="#f8fafc"),
+        row(f'<span style="font-size:12px;color:{MUTED}">Org rates: {orgs} &nbsp;|&nbsp; {pipeline(stats, money)}</span>', pad="12px 28px", bg="#f8fafc"),
         row(heading("Collection rate by rep") + table([("Rep", "left"), ("", "left"), ("Rate", "right")], rep_rows)),
         row(heading("Escalations and unassigned") + esc_html),
+        row(heading(f"Drafts for finance to issue ({len(recent)})")
+            + (note("Client-waiting first, then oldest.") + action_table(recent, with_rep=True, links=False, keep_order=True)
+               if recent else '<div style="color:#16a34a;font-weight:600">No recent drafts.</div>')),
+        row(heading(f"Dormant opportunities, drafts {STALE_DRAFT_DAYS}+ days ({len(stale)})") + note(stale_note)
+            + (action_table(stale_shown, with_rep=True, links=False, keep_order=True) if stale_shown else "")),
     ])
+
+
+# ---------- "Log update" links and run log (Apps Script web app, see apps_script/) ----------
+def sign(secret, payload):
+    """token = base64url(json payload) + '.' + hex HMAC-SHA256 over that base64 string; apps_script/Code.gs verifies it."""
+    b = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode()).rstrip(b"=").decode()
+    return b + "." + hmac.new(secret.encode(), b.encode(), hashlib.sha256).hexdigest()
+
+
+def add_links(items, url, secret, today):
+    exp = (today + timedelta(days=LINK_DAYS)).isoformat()
+    for i in items:
+        if i["rep"] != UN:  # unassigned has no rep to attribute a tap to
+            payload = dict(r=i["rep"], o=i["org"], n=i["number"], e=exp)
+            if i["kind"] == "draft":
+                payload["k"] = "d"  # draft token: the page offers only "Client is waiting"
+            i["link"] = f"{url}?t={sign(secret, payload)}"
+
+
+def post_events(events, url, secret):
+    """Best effort: a logging failure must never stop or undo the reminders themselves."""
+    if not (url and secret and events):
+        return
+    body = json.dumps(events).encode()
+    sig = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    try:
+        fetch(urllib.request.Request(f"{url}?sig={sig}", data=body, method="POST",
+                                     headers={"Content-Type": "text/plain"}), timeout=30, tries=2)
+    except Exception as e:  # noqa: BLE001
+        print(f"WARNING: could not write run log ({type(e).__name__}); reminders were unaffected.")
+
+
+def drafts_event(items, today):
+    """Every draft, upserted weekly-or-daily into the Opportunities tab so the upsell agent has the data even if a draft is later deleted in Zoho."""
+    rows = [dict(o=i["org"], n=i["number"], client=i["client"], amount=i["balance"], days=i["days"],
+                 created=(today - timedelta(days=i["days"])).isoformat(), by=i["created_by"], rep=i["rep"])
+            for i in items if i["kind"] == "draft"]
+    return dict(id=f"{today}:drafts", type="drafts", rows=rows) if rows else None
+
+
+def sent_events(msgs_by_rep, today):
+    """Event ids are stable per rep/day so a retried POST can never double-log."""
+    def worst(its):
+        open_ = [i["tier"] for i in its if i["kind"] != "draft"]
+        return max(open_, key=ORDER.index) if open_ else "drafts only"
+    ev = [dict(id=f"{today}:sent:{rep}", type="sent", rep=rep, detail=f"{len(its)} invoice(s), worst tier {worst(its)}",
+               invoices=[f"{i['org']}|{i['number']}" for i in its]) for rep, its in msgs_by_rep.items()]
+    return ev + [dict(id=f"{today}:run", type="run", detail=f"{len(msgs_by_rep)} rep email(s)")]
 
 
 # ---------- IO ----------
@@ -441,20 +569,30 @@ def main():
     rep_of = {(c["Organization"].strip().lower(), c["Client name"].strip().lower()): c["Rep"].strip()
               for c in clients if c["Rep"].strip() in reps}
     items, stats, outst, oldest = build(invs, rep_of, follow, today, reps)
-    msgs = []
+    url, secret = os.environ.get("APPS_SCRIPT_URL"), os.environ.get("LINK_SECRET")
+    if url and secret:
+        add_links(items, url, secret, today)
+    msgs, by_rep = [], {}
     for rep, row in reps.items():
-        mine = [i for i in items if i["rep"] == rep]
-        if not mine:
+        mine = [i for i in items if i["rep"] == rep and not (i["kind"] == "draft" and i["days"] >= STALE_DRAFT_DAYS)]
+        if not mine:  # dormant drafts go to management as opportunities, not to reps
             continue
+        by_rep[rep] = mine
         subj, body, escalate = compose_rep(rep, mine, stats, outst, oldest)
         boss = next((m for m in managers if m["Rep"].strip() == row["Manager"].strip()), managers[0] if managers else None)
         msgs.append((row["Email"], boss["Email"] if escalate and boss else "", subj, body,
                      html_rep(rep, mine, stats, outst, oldest, today)))
     if managers:
-        subj, body = compose_manager(items, stats, list(reps))
+        subj, body = compose_manager(items, stats, list(reps), today)
         page = html_manager(items, stats, list(reps), today)
         msgs += [(m["Email"], "", subj, body, page) for m in managers]
-    deliver(msgs, os.environ.get("SEND") == "1")
+    send = os.environ.get("SEND") == "1"
+    cap = int(os.environ.get("DAILY_SEND_CAP") or DEFAULT_SEND_CAP)
+    if send and len(msgs) > cap:
+        raise SystemExit(f"Refusing to send {len(msgs)} emails (cap {cap}). Raise DAILY_SEND_CAP if this is expected.")
+    deliver(msgs, send)
+    if send:
+        post_events(sent_events(by_rep, today) + [e for e in [drafts_event(items, today)] if e], url, secret)
 
 
 if __name__ == "__main__":

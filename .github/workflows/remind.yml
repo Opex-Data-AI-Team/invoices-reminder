@@ -31,3 +31,6 @@ jobs:
           ZOHO_REFRESH_TOKEN: ${{ secrets.ZOHO_REFRESH_TOKEN }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          APPS_SCRIPT_URL: ${{ secrets.APPS_SCRIPT_URL }} # optional: enables "Log update" links + run log
+          LINK_SECRET: ${{ secrets.LINK_SECRET }}
+          DAILY_SEND_CAP: ${{ vars.DAILY_SEND_CAP }} # optional, default 400
