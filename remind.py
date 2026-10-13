@@ -555,6 +555,8 @@ def diagnose(invs, reps_rows, clients, follow, reps, rep_of, items):
     pr("LINK_SECRET set:", bool(sec), "| length:", len(sec), "| fingerprint:", hashlib.sha256(sec.encode()).hexdigest()[:8] if sec else "-",
        "| has surrounding whitespace:", sec != sec.strip())
     pr("APPS_SCRIPT_URL host/path shape:", urllib.parse.urlparse(u.strip()).netloc, "/".join(p[:6] for p in urllib.parse.urlparse(u.strip()).path.split("/")), "| contains /u/:", "/u/" in u)
+    if sec and u:  # temporary: a harmless test link (made-up rep/invoice) to prove signing end to end
+        pr("TEST LINK:", f"{u.strip()}?t={sign(sec, dict(r='Diag Rep', o='Regtech', n='DIAG-1', e=(datetime.now(WAT).date() + timedelta(days=1)).isoformat()))}")
     pr("Reps tab columns:", list(reps_rows[0]) if reps_rows else "EMPTY")
     pr("Reps tab roles:", dict(Counter(r.get("Role", "?").strip() for r in reps_rows)), "| reps used:", len(reps))
     pr("Clients tab columns:", list(clients[0]) if clients else "EMPTY", "| rows:", len(clients), "| mapped to a known rep:", len(rep_of))
