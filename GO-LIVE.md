@@ -59,6 +59,8 @@ Use a **test copy of the Google Sheet** (Reps, Clients, Followups) with the Apps
 | 11 | Change one character of the token in a link | "Link invalid or expired". |
 | 12 | Two people (or two browser tabs) tap different buttons at the same moment, 3 or 4 times | No lost rows, no garbled cells. |
 | 13 | Paste a link into WhatsApp and send it to yourself | The link preview alone changes no data. |
+| 13a | Open a link you already used | Page shows `Currently: <last status>`. After a tap the buttons stay, and tapping another one overwrites Followups (`Log` keeps both). |
+| 13b | After test 10 (Pause), run `send=1` | The invoice is listed under **Paused** with a **Resume** button. Tapping it sets Status = `Chasing` and the invoice returns to **Needs action** on the next run. |
 
 ### 6c. Drafts and opportunities
 | # | Do this | Expected |

@@ -247,6 +247,22 @@ def test_drafts_pipeline_and_snapshot():
     assert remind.drafts_event([i for i in items if i["kind"] != "draft"], TODAY) is None
 
 
+def test_paused_invoices_can_be_resumed_from_the_email():
+    from remind import add_links
+    paused = []
+    items, stats, outst, oldest = build(INVS, REP_OF, FOLLOW, TODAY, paused=paused)
+    assert [i["number"] for i in paused] == ["I7"] and paused[0]["rep"] == "Bob" and paused[0]["paused"]
+    assert "I7" not in {i["number"] for i in items}                                    # still out of the reminders and totals
+    bob = [i for i in items if i["rep"] == "Bob"]
+    assert "Paused (" not in compose_rep("Bob", bob, stats, outst, oldest)[1]            # no links -> nothing to show
+    add_links(items + paused, "https://x.test/", "k", TODAY)
+    assert verify("k", paused[0]["link"].split("?t=")[1])["k"] == "p"
+    body = compose_rep("Bob", bob, stats, outst, oldest, paused)[1]
+    assert "Paused (1)" in body and body.count("Resume: https://x.test/?t=") == 1
+    assert "Resume</a>" in html_rep("Bob", bob, stats, outst, oldest, TODAY, paused)
+    assert "Paused (" not in compose_rep("Ann", [i for i in items if i["rep"] == "Ann"], stats, outst, oldest)[1]
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

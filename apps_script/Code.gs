@@ -54,6 +54,9 @@ function page_(html) {
 
 function doGet(e) {
   var p = verifyToken_(e && e.parameter && e.parameter.t);
+  if (p && e.parameter.s === '1') { // read-only status for the static tap page (fetch)
+    return ContentService.createTextOutput(JSON.stringify({ status: statusOf_(p.o, p.n) })).setMimeType(ContentService.MimeType.JSON);
+  }
   if (!p) return page_('<body style="font-family:sans-serif;padding:24px"><h3>Link invalid or expired</h3>' +
     '<p>Use the link in today\'s collections email.</p></body>');
   var t = HtmlService.createTemplate(
@@ -88,7 +91,7 @@ function logUpdate(token, action, date) {
   var p = verifyToken_(token);
   if (!p) throw new Error('Link invalid or expired');
   if (!ACTIONS.hasOwnProperty(action)) throw new Error('Unknown action');
-  if ((p.k === 'd') !== (action === 'urgent')) throw new Error('That action is not available for this invoice'); // drafts: only "Client is waiting"
+  if ((p.k === 'd') !== (action === 'urgent') || (p.k === 'p' && action !== 'chasing')) throw new Error('That action is not available for this invoice'); // drafts: only "Client is waiting"; paused: only Resume (Chasing)
   if (action === 'promised') {
     var max = Utilities.formatDate(new Date(Date.now() + 60 * 864e5), TZ, 'yyyy-MM-dd');
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date || '') || date < today_() || date > max) throw new Error('Pick a date within the next 60 days');
@@ -103,7 +106,7 @@ function logUpdate(token, action, date) {
   return 'Saved: ' + ACTIONS[action] + (date ? ' ' + date : '') + '. You can close this page.';
 }
 
-function upsertFollowup_(org, inv, status, date) {
+function followLookup_(org, inv) { // -> {sh, data, c, row}; row is the 1-based sheet row, or -1 when this invoice has none yet
   var sh = ss_().getSheetByName(FOLLOWUPS);
   var data = sh.getDataRange().getValues();
   var h = data[0].map(function (x) { return String(x).trim(); });
@@ -113,9 +116,22 @@ function upsertFollowup_(org, inv, status, date) {
   for (var i = 1; i < data.length; i++) {
     if (String(data[i][c.org]).trim().toLowerCase() === org.toLowerCase() && String(data[i][c.inv]).trim() === String(inv)) { row = i + 1; break; }
   }
+  return { sh: sh, data: data, c: c, row: row };
+}
+
+function upsertFollowup_(org, inv, status, date) {
+  var f = followLookup_(org, inv), sh = f.sh, c = f.c, row = f.row;
   if (row < 0) { row = sh.getLastRow() + 1; sh.getRange(row, c.org + 1).setValue(org); sh.getRange(row, c.inv + 1).setNumberFormat('@').setValue(inv); }
   sh.getRange(row, c.st + 1).setValue(status);
   sh.getRange(row, c.dt + 1).setNumberFormat('@').setValue(date); // text, so Sheets never turns it into a locale date
+}
+
+/** Current Followups status for an invoice, e.g. "Promised 2026-10-20"; '' when none. */
+function statusOf_(org, inv) {
+  var f = followLookup_(org, inv);
+  if (f.row < 0) return '';
+  var st = String(f.data[f.row - 1][f.c.st]).trim(), dt = String(f.data[f.row - 1][f.c.dt]).trim();
+  return st && (st + (dt ? ' ' + dt : ''));
 }
 
 function appendLog_(events) {

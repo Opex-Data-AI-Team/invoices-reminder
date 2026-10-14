@@ -73,7 +73,8 @@ def classify(inv):
     return "paid" if st == "paid" or inv["balance"] <= 0 else "open"
 
 
-def build(invs_by_org, rep_of, follow, today, reps=None):
+def build(invs_by_org, rep_of, follow, today, reps=None, paused=None):
+    """paused: optional list that receives invoices a rep set to Dead, so they can be resumed from the email without touching the sheet."""
     known = {r.lower(): r for r in reps} if reps is not None else None  # None: trust Zoho salesperson as-is
     items = []
     stats = defaultdict(lambda: [0.0, 0.0, 0])  # key -> [invoiced, paid, count]
@@ -114,6 +115,9 @@ def build(invs_by_org, rep_of, follow, today, reps=None):
             promised = (fu.get("Promised pay date") or "").strip()
             broken = False
             if status == "dead":
+                if paused is not None and kind == "open":
+                    paused.append(dict(rep=rep, org=org, number=i["invoice_number"], client=i["customer_name"], balance=i["balance"],
+                                       kind=kind, days=days, paused=True))
                 continue
             if status == "promised" and promised and d(promised) < today:
                 broken = True  # a promise no longer pauses reminders; only a missed one escalates
@@ -177,7 +181,7 @@ def stats_block(rep, items, stats, outst, oldest):
     return "\n".join(lines)
 
 
-def compose_rep(rep, items, stats, outst, oldest):
+def compose_rep(rep, items, stats, outst, oldest, paused=()):
     open_, drafts, _ = split(items)
     worst = max((i["tier"] for i in open_), key=ORDER.index) if open_ else None
     first = rep.split()[0]
@@ -192,6 +196,10 @@ def compose_rep(rep, items, stats, outst, oldest):
                   *[line(i) for i in sorted(drafts, key=lambda i: -i["days"])]]
         if any(i.get("link") for i in drafts):
             parts += ["If a client is expecting one, tap Client is waiting so finance prioritises it."]
+    paused = [i for i in paused if i.get("link")]
+    if paused:
+        parts += ["", f"Paused ({len(paused)}): reminders are off for these. Tap Resume to turn them back on.",
+                  *[f"- {i['org']} {i['number']} {i['client']}: NGN {i['balance']:,.0f}\n    Resume: {i['link']}" for i in paused]]
     subj = f"Collections: {len(open_)} invoice(s) need you today" if open_ else f"Collections: {len(drafts)} invoice(s) waiting on billing"
     return subj, "\n".join(parts), bool(worst) and ORDER.index(worst) >= ORDER.index("blunt")
 
@@ -326,7 +334,16 @@ def steps(texts):
     return f'<table cellpadding="0" cellspacing="0" width="100%">{"".join(out)}</table>'
 
 
-def html_rep(rep, items, stats, outst, oldest, today):
+def paused_table(paused):
+    rows = [f'<tr><td style="padding:8px"><b>{esc(i["number"])}</b><br><span style="font-size:12px;color:{MUTED}">{esc(i["org"])}</span></td>'
+            f'<td style="padding:8px">{esc(i["client"])}</td><td align="right" style="padding:8px"><b>{money(i["balance"])}</b></td>'
+            f'<td align="right" style="padding:8px"><a href="{esc(i["link"])}" style="display:inline-block;padding:6px 12px;background:#fff;color:{INK};'
+            f'border:1px solid {INK};border-radius:6px;font-size:12px;font-weight:600;text-decoration:none">Resume</a></td></tr>' for i in paused]
+    return table([("Invoice", "left"), ("Client", "left"), ("Balance", "right"), ("", "right")], rows)
+
+
+def html_rep(rep, items, stats, outst, oldest, today, paused=()):
+    paused = [i for i in paused if i.get("link")]
     open_, drafts, _ = split(items)
     worst = max((i["tier"] for i in open_), key=ORDER.index) if open_ else None
     s, team = stats.get(rep), pct(stats.get("__team__"))
@@ -351,6 +368,9 @@ def html_rep(rep, items, stats, outst, oldest, today):
         *([row(heading(f"Waiting on billing ({len(drafts)})")
                + f'<div style="font-size:13px;color:{MUTED};margin-bottom:10px">Finance issues these. Nothing for you to fix; tap <b>Client is waiting</b> if the client is expecting one.</div>'
                + action_table(drafts))] if drafts else []),
+        *([row(heading(f"Paused ({len(paused)})")
+               + f'<div style="font-size:13px;color:{MUTED};margin-bottom:10px">Reminders are off for these. Tap <b>Resume</b> to turn them back on.</div>'
+               + paused_table(paused))] if paused else []),
     ])
 
 
@@ -404,6 +424,8 @@ def add_links(items, url, secret, today):
             payload = dict(r=i["rep"], o=i["org"], n=i["number"], e=exp)
             if i["kind"] == "draft":
                 payload["k"] = "d"  # draft token: the page offers only "Client is waiting"
+            elif i.get("paused"):
+                payload["k"] = "p"  # paused token: the page offers only "Resume"
             i["link"] = f"{url}?t={sign(secret, payload)}"
 
 
@@ -601,23 +623,25 @@ def main():
     managers = [r for r in reps_rows if r["Role"].strip() == "manager"]
     rep_of = {(c["Organization"].strip().lower(), c["Client name"].strip().lower()): c["Rep"].strip()
               for c in clients if c["Rep"].strip() in reps}
-    items, stats, outst, oldest = build(invs, rep_of, follow, today, reps)
+    paused = []
+    items, stats, outst, oldest = build(invs, rep_of, follow, today, reps, paused)
     if os.environ.get("DIAGNOSE") == "1":
         return diagnose(invs, reps_rows, clients, follow, reps, rep_of, items)
     url, secret = os.environ.get("APPS_SCRIPT_URL"), os.environ.get("LINK_SECRET")
     if url and secret:
         # LINK_PAGE_URL: static page that calls Apps Script via fetch, so Google's /u/N/ account redirect never hits the rep's phone
-        add_links(items, (os.environ.get("LINK_PAGE_URL") or url).strip(), secret, today)
+        add_links(items + paused, (os.environ.get("LINK_PAGE_URL") or url).strip(), secret, today)
     msgs, by_rep = [], {}
     for rep, row in reps.items():
         mine = [i for i in items if i["rep"] == rep and not (i["kind"] == "draft" and i["days"] >= STALE_DRAFT_DAYS)]
         if not mine:  # dormant drafts go to management as opportunities, not to reps
             continue
         by_rep[rep] = mine
-        subj, body, escalate = compose_rep(rep, mine, stats, outst, oldest)
+        mine_paused = [i for i in paused if i["rep"] == rep]
+        subj, body, escalate = compose_rep(rep, mine, stats, outst, oldest, mine_paused)
         boss = next((m for m in managers if m["Rep"].strip() == row["Manager"].strip()), managers[0] if managers else None)
         msgs.append((row["Email"], boss["Email"] if escalate and boss else "", subj, body,
-                     html_rep(rep, mine, stats, outst, oldest, today)))
+                     html_rep(rep, mine, stats, outst, oldest, today, mine_paused)))
     if managers:
         subj, body = compose_manager(items, stats, list(reps), today)
         page = html_manager(items, stats, list(reps), today)
