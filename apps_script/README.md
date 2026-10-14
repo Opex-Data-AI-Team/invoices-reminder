@@ -5,6 +5,7 @@ This is what receives the "Log update" taps and keeps the run log. Phase 1 of th
 1. Open the Google Sheet with the Reps / Clients / Followups tabs > **Extensions > Apps Script**. Paste `Code.gs` over the default file.
 2. **Project Settings > Script properties**, add:
    - `LINK_SECRET`: a long random string (e.g. 40+ characters). Same value goes in the GitHub secret `LINK_SECRET`.
+   - `SHEET_ID`: only if the script is a standalone project (not opened via Extensions > Apps Script from the Sheet). It is the long ID in the Sheet URL between `/d/` and `/edit`.
    - `ALERT_EMAIL`: where the "reminder did not run" alert goes (techops).
 3. **Deploy > New deployment > Web app**. Execute as: **Me**. Who has access: **Anyone** (the signed token is the access control; the page only lets someone update the one invoice the link was made for). Copy the web app URL ending in `/exec`.
 4. GitHub repo **Settings > Secrets**: add `APPS_SCRIPT_URL` (the URL above) and `LINK_SECRET`.

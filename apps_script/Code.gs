@@ -7,7 +7,7 @@
  * - doPost: remind.py posts "sent"/"run" events (HMAC-signed body).
  * - heartbeat: daily trigger, emails ALERT_EMAIL if remind.py did not log a run on a workday.
  *
- * Script properties (Project Settings): LINK_SECRET (same as the GitHub secret), ALERT_EMAIL.
+ * Script properties (Project Settings): LINK_SECRET (same as the GitHub secret), ALERT_EMAIL, SHEET_ID (only if the script is not bound to the Sheet).
  */
 var FOLLOWUPS = 'Followups';
 var LOG = 'Log';
@@ -16,6 +16,8 @@ var ACTIONS = { chasing: 'Chasing', promised: 'Promised', paid: 'Paid', disputed
 var TZ = 'Africa/Lagos';
 
 function prop_(k) { return PropertiesService.getScriptProperties().getProperty(k) || ''; }
+// Bound script: getActive() works. Standalone script (getActive() is null): set script property SHEET_ID.
+function ss_() { return SpreadsheetApp.getActive() || SpreadsheetApp.openById(prop_('SHEET_ID')); }
 function today_() { return Utilities.formatDate(new Date(), TZ, 'yyyy-MM-dd'); }
 function hex_(bytes) {
   return bytes.map(function (b) { return ('0' + (b & 0xff).toString(16)).slice(-2); }).join('');
@@ -102,7 +104,7 @@ function logUpdate(token, action, date) {
 }
 
 function upsertFollowup_(org, inv, status, date) {
-  var sh = SpreadsheetApp.getActive().getSheetByName(FOLLOWUPS);
+  var sh = ss_().getSheetByName(FOLLOWUPS);
   var data = sh.getDataRange().getValues();
   var h = data[0].map(function (x) { return String(x).trim(); });
   var c = { org: h.indexOf('Organization'), inv: h.indexOf('Invoice'), st: h.indexOf('Status'), dt: h.indexOf('Promised pay date') };
@@ -117,7 +119,7 @@ function upsertFollowup_(org, inv, status, date) {
 }
 
 function appendLog_(events) {
-  var ss = SpreadsheetApp.getActive();
+  var ss = ss_();
   var sh = ss.getSheetByName(LOG) || ss.insertSheet(LOG);
   if (sh.getLastRow() === 0) sh.appendRow(LOG_HEAD);
   var seen = {};
@@ -134,7 +136,7 @@ function appendLog_(events) {
 
 /** Opportunities tab: one row per draft invoice, kept forever. Drafts are lost opportunities to win back (upsell agent), never voided. */
 function upsertDrafts_(rows) {
-  var ss = SpreadsheetApp.getActive();
+  var ss = ss_();
   var sh = ss.getSheetByName('Opportunities') || ss.insertSheet('Opportunities');
   var head = ['Organization', 'Invoice', 'Client', 'Amount', 'Draft created', 'Age (days)', 'Created by', 'Rep', 'First seen', 'Last seen'];
   if (sh.getLastRow() === 0) sh.appendRow(head);
@@ -175,7 +177,7 @@ function doPost(e) {
 function heartbeat() {
   var day = Utilities.formatDate(new Date(), TZ, 'u'); // 1=Mon..7=Sun
   if (day > 5) return;
-  var sh = SpreadsheetApp.getActive().getSheetByName(LOG);
+  var sh = ss_().getSheetByName(LOG);
   var want = today_() + ':run';
   var ok = sh && sh.getLastRow() > 1 && sh.getRange(2, 2, sh.getLastRow() - 1, 1).getValues().some(function (r) { return r[0] === want; });
   if (!ok && prop_('ALERT_EMAIL')) {
