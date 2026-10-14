@@ -51,11 +51,6 @@ function page_(html) {
 }
 
 function doGet(e) {
-  if (e && e.parameter && e.parameter.diag === '1') { // temporary: compare with the GitHub LINK_SECRET fingerprint, then remove
-    var sec = prop_('LINK_SECRET');
-    return ContentService.createTextOutput(JSON.stringify({ set: !!sec, len: sec.length,
-      fp: sec ? hex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, sec)).slice(0, 8) : '-', ws: sec !== sec.trim() }));
-  }
   var p = verifyToken_(e && e.parameter && e.parameter.t);
   if (!p) return page_('<body style="font-family:sans-serif;padding:24px"><h3>Link invalid or expired</h3>' +
     '<p>Use the link in today\'s collections email.</p></body>');
@@ -159,6 +154,12 @@ function upsertDrafts_(rows) {
 function doPost(e) {
   var body = (e && e.postData && e.postData.contents) || '';
   var sig = (e && e.parameter && e.parameter.sig) || '';
+  if (!sig) { // tap from the static page (page/index.html): {t, a, d}; logUpdate re-verifies the token
+    var out;
+    try { var o = JSON.parse(body); out = { ok: true, msg: logUpdate(o.t, o.a, o.d) }; }
+    catch (err) { out = { ok: false, msg: String(err.message || err) }; }
+    return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON);
+  }
   if (!prop_('LINK_SECRET') || !same_(sig, hmac_(body))) return ContentService.createTextOutput('{"ok":false}');
   var lock = LockService.getScriptLock();
   lock.waitLock(20000);

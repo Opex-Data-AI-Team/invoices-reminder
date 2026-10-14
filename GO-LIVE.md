@@ -4,6 +4,7 @@
 - [ ] Secrets set: `ZOHO_CLIENT_ID`, `ZOHO_CLIENT_SECRET`, `ZOHO_REFRESH_TOKEN`, `GMAIL_USER`, `GMAIL_APP_PASSWORD`, `REPS_SRC`, `CLIENTS_SRC`, `FOLLOWUPS_SRC`
 - [ ] Response tracking secrets set: `APPS_SCRIPT_URL`, `LINK_SECRET` (see `apps_script/README.md`; same `LINK_SECRET` in Apps Script)
 - [ ] Variable `ZOHO_ORGS` set, and the org names match the Clients tab
+- [ ] Variable `LINK_PAGE_URL` = the deployed `page/` (static tap page, e.g. on Vercel). Without it, links open Apps Script directly, which breaks on phones signed into several Google accounts (Google rewrites to `/macros/u/N/`)
 - [ ] Optional variable `DAILY_SEND_CAP` (default 400)
 - [ ] Variable `SEND` is unset
 

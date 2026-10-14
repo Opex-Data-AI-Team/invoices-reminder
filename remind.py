@@ -555,8 +555,6 @@ def diagnose(invs, reps_rows, clients, follow, reps, rep_of, items):
     pr("LINK_SECRET set:", bool(sec), "| length:", len(sec), "| fingerprint:", hashlib.sha256(sec.encode()).hexdigest()[:8] if sec else "-",
        "| has surrounding whitespace:", sec != sec.strip())
     pr("APPS_SCRIPT_URL host/path shape:", urllib.parse.urlparse(u.strip()).netloc, "/".join(p[:6] for p in urllib.parse.urlparse(u.strip()).path.split("/")), "| contains /u/:", "/u/" in u)
-    if sec and u:  # temporary: a harmless test link (made-up rep/invoice) to prove signing end to end
-        pr("TEST LINK:", f"{u.strip()}?t={sign(sec, dict(r='Diag Rep', o='Regtech', n='DIAG-1', e=(datetime.now(WAT).date() + timedelta(days=1)).isoformat()))}")
     pr("Reps tab columns:", list(reps_rows[0]) if reps_rows else "EMPTY")
     pr("Reps tab roles:", dict(Counter(r.get("Role", "?").strip() for r in reps_rows)), "| reps used:", len(reps))
     pr("Clients tab columns:", list(clients[0]) if clients else "EMPTY", "| rows:", len(clients), "| mapped to a known rep:", len(rep_of))
@@ -608,7 +606,8 @@ def main():
         return diagnose(invs, reps_rows, clients, follow, reps, rep_of, items)
     url, secret = os.environ.get("APPS_SCRIPT_URL"), os.environ.get("LINK_SECRET")
     if url and secret:
-        add_links(items, url, secret, today)
+        # LINK_PAGE_URL: static page that calls Apps Script via fetch, so Google's /u/N/ account redirect never hits the rep's phone
+        add_links(items, (os.environ.get("LINK_PAGE_URL") or url).strip(), secret, today)
     msgs, by_rep = [], {}
     for rep, row in reps.items():
         mine = [i for i in items if i["rep"] == rep and not (i["kind"] == "draft" and i["days"] >= STALE_DRAFT_DAYS)]

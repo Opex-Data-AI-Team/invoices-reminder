@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Collections update</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body{font-family:Segoe UI,Arial,sans-serif;max-width:420px;margin:0 auto;padding:20px}
+button{display:block;width:100%;margin-top:10px;padding:14px;font-size:16px;border-radius:8px;border:1px solid #0f172a;background:#0f172a;color:#fff}
+#dead{background:#fff;color:#dc2626;border-color:#dc2626}
+</style></head><body>
+<h2 id="h" style="margin:0"></h2><p id="sub" style="color:#64748b;margin:4px 0 20px"></p>
+<div id="btns"></div><p id="msg" style="font-weight:600"></p>
+<script>
+// Tap page: same buttons as the Apps Script page, but fetch() sends no Google cookies, so Google's /u/N/ account redirect can't break it.
+// The signature is checked by Apps Script (logUpdate); this page only reads the token to show the invoice.
+var API = "https://script.google.com/macros/s/AKfycby3UJuEI8tHe-vOD-XNpb0YxsyNa0x0otiscijRxMlf2nxYmgSzAEUHXSPitNgcSO2b/exec";
+var T = new URLSearchParams(location.search).get("t") || "", P = null, armed = false;
+try { var b = T.split(".")[0].replace(/-/g, "+").replace(/_/g, "/"); P = JSON.parse(atob(b + "===".slice((b.length + 3) % 4))); } catch (e) {}
+var $ = function (id) { return document.getElementById(id); };
+function btn(label, fn, id) { var x = document.createElement("button"); x.textContent = label; if (id) x.id = id; x.onclick = fn; $("btns").appendChild(x); return x; }
+function go(a) {
+  var d = $("d") ? $("d").value : ""; $("msg").textContent = "Saving...";
+  fetch(API, { method: "POST", body: JSON.stringify({ t: T, a: a, d: d }), headers: { "Content-Type": "text/plain" } })
+    .then(function (r) { return r.json(); })
+    .then(function (j) { if (j.ok) $("btns").style.display = "none"; $("msg").textContent = (j.ok ? "" : "Not saved: ") + j.msg; })
+    .catch(function () { $("msg").textContent = "Not saved: could not reach the server. Check your connection and tap again."; });
+}
+if (!P || !P.n || (P.e && P.e < new Date().toISOString().slice(0, 10))) {
+  $("h").textContent = "Link invalid or expired"; $("sub").textContent = "Use the link in today's collections email.";
+} else {
+  $("h").textContent = "Invoice " + P.n; $("sub").textContent = P.o + " · " + P.r;
+  if (P.k === "d") {
+    $("btns").insertAdjacentHTML("beforebegin", "<p>This invoice is still a draft. Finance issues it; you cannot change it.</p>");
+    btn("Client is waiting", function () { go("urgent"); });
+  } else {
+    btn("Chasing", function () { go("chasing"); });
+    $("btns").insertAdjacentHTML("beforeend", '<label style="display:block;margin:12px 0 4px">Promised to pay on</label>' +
+      '<input type="date" id="d" style="font-size:16px;padding:8px;width:100%;box-sizing:border-box">');
+    btn("Save promise", function () { go("promised"); });
+    btn("Client says paid", function () { go("paid"); });
+    btn("Disputed", function () { go("disputed"); });
+    btn("Pause: client unreachable (stop reminders)", function () {
+      if (!armed) { armed = true; $("dead").textContent = "Tap again to confirm: pause reminders"; return; } go("dead");
+    }, "dead");
+  }
+}
+</script></body></html>
