@@ -7,6 +7,9 @@ on:
       send:
         description: "1 = really send, 0 = dry run"
         default: "0"
+      phase2:
+        description: "1 = preview the Phase 2 rules and scorecard (manager summary appears on the run page when send is 0); needs the LOG_SRC secret"
+        default: "0"
       diagnose:
         description: "1 = print who gets what (counts and client names only), send nothing"
         default: "0"
@@ -39,6 +42,5 @@ jobs:
           APPS_SCRIPT_URL: ${{ secrets.APPS_SCRIPT_URL }} # optional: enables "Log update" links + run log
           LINK_SECRET: ${{ secrets.LINK_SECRET }}
           LOG_SRC: ${{ secrets.LOG_SRC }} # optional: Log tab published as CSV; needed for the Phase 2 rules and scorecard
-          PHASE2: ${{ vars.PHASE2 }} # 1 = live promises collapse, no-response escalation, manager scorecard (needs LOG_SRC)
-          MANAGERS_ONLY: ${{ vars.MANAGERS_ONLY }} # 1 = shadow run: only managers get emails
+          PHASE2: ${{ inputs.phase2 == '1' && '1' || vars.PHASE2 }} # 1 = live promises collapse, no-response escalation, manager scorecard (needs LOG_SRC); the variable turns it on for every run
           DAILY_SEND_CAP: ${{ vars.DAILY_SEND_CAP }} # optional, default 400

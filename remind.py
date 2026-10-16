@@ -814,8 +814,6 @@ def main():
         add_links(items + paused + (promised or []), (os.environ.get("LINK_PAGE_URL") or url).strip(), secret, today)
     msgs, by_rep = [], {}
     for rep, row in reps.items():
-        if os.environ.get("MANAGERS_ONLY") == "1":  # shadow run: managers see the new rules, reps are untouched
-            break
         mine = [i for i in items if i["rep"] == rep and not (i["kind"] == "draft" and i["days"] >= STALE_DRAFT_DAYS)]
         if not mine:  # dormant drafts go to management as opportunities, not to reps
             continue
@@ -834,6 +832,11 @@ def main():
     cap = int(os.environ.get("DAILY_SEND_CAP") or DEFAULT_SEND_CAP)
     if send and len(msgs) > cap:
         raise SystemExit(f"Refusing to send {len(msgs)} emails (cap {cap}). Raise DAILY_SEND_CAP if this is expected.")
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if phase2 and not send and managers and summary:  # preview on the run page (private repo only, like the client list export)
+        with open(summary, "a", encoding="utf-8") as f:
+            f.write("### Manager summary preview (Phase 2 on, nothing sent)" + chr(10) + "```" + chr(10)
+                    + compose_manager(items, stats, list(reps), today, score)[1] + chr(10) + "```" + chr(10))
     deliver(msgs, send)
     if send:
         post_events(sent_events(by_rep, today) + [e for e in [drafts_event(items, today)] if e], url, secret)

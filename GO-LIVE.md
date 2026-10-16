@@ -93,9 +93,9 @@ Use a **test copy of the Google Sheet** (Reps, Clients, Followups) with the Apps
 
 ## 7b. Phase 2: response-aware rules (after a week of real taps)
 - [ ] Add secret `LOG_SRC`: the same CSV link as `REPS_SRC` with `tab=Log` (confirm it returns the `ts,event_id,...` header in a private window); re-run `installTriggers` (adds the monthly Log archive)
-- [ ] Shadow run, two weeks: set variables `PHASE2=1` and `MANAGERS_ONLY=1`. Only managers get emails; check the "Rep response" table and the Escalations list against what you know
+- [ ] Preview, any time and as often as you like: Actions > remind > Run workflow with `send=0` and `phase2=1`. Nothing is sent, reps are unaffected, and the manager summary shows on the run page. Check the "Rep response" table and the Escalations list against what you know
 - [ ] Rules in play: a live promise moves to a quiet "Promised" list until its date; no tap for `IGNORE_DAYS` (3) working days raises the tier one step; scorecard covers the last 30 days
-- [ ] Happy with it: delete `MANAGERS_ONLY`; reps now get the new behaviour. Rollback: delete `PHASE2`
+- [ ] Happy with it: set variable `PHASE2=1`; every run, and so every rep email, uses the new rules. Rollback: delete `PHASE2`
 
 ## 8. After go-live (first week)
 - [ ] Check the 08:00 UTC (09:00 WAT) weekday run is green and a `run` row appears in `Log` each day
