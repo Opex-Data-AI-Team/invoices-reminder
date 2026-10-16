@@ -12,7 +12,7 @@
 - [ ] Every `Rep` name on the Reps tab (Role = rep) matches the Zoho salesperson name, case aside
 - [ ] Every rep and manager has a valid `Email`, and each rep's `Manager` matches a manager's `Rep` name
 - [ ] The Clients tab covers your main paying clients (it's the fallback when Zoho has no salesperson). Regtech invoices have no salesperson set in Zoho, so this tab decides who gets each one.
-- [ ] Reps tab has each rep's `WhatsApp` number (used later for the WhatsApp buttons)
+- [ ] Reps tab has each rep's `WhatsApp` number (feeds the manager's "Nudge on WhatsApp" buttons; local `0803...` or `+234803...` both work)
 - [ ] Followups tab headers are exactly `Organization, Invoice, Rep note, Promised pay date, Status`
 - [ ] Finance knows: stale drafts (30+ days) are never voided. They are dormant opportunities, listed to management every Monday and kept in the `Opportunities` tab.
 
@@ -90,6 +90,12 @@ Use a **test copy of the Google Sheet** (Reps, Clients, Followups) with the Apps
 - [ ] Confirm no bounces and no Gmail send errors
 - [ ] Run `installTriggers` in Apps Script (turns on the 10:30 "did it run?" alert)
 - [ ] Set variable `SEND=1`
+
+## 7b. Phase 2: response-aware rules (after a week of real taps)
+- [ ] Publish the `Log` tab as CSV and add it as secret `LOG_SRC`; re-run `installTriggers` (adds the monthly Log archive)
+- [ ] Shadow run, two weeks: set variables `PHASE2=1` and `MANAGERS_ONLY=1`. Only managers get emails; check the "Rep response" table and the Escalations list against what you know
+- [ ] Rules in play: a live promise moves to a quiet "Promised" list until its date; no tap for `IGNORE_DAYS` (3) working days raises the tier one step; scorecard covers the last 30 days
+- [ ] Happy with it: delete `MANAGERS_ONLY`; reps now get the new behaviour. Rollback: delete `PHASE2`
 
 ## 8. After go-live (first week)
 - [ ] Check the 08:00 UTC (09:00 WAT) weekday run is green and a `run` row appears in `Log` each day

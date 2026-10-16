@@ -7,6 +7,7 @@ button{display:block;width:100%;margin-top:10px;padding:14px;font-size:16px;bord
 #dead{background:#fff;color:#dc2626;border-color:#dc2626}
 </style></head><body>
 <h2 id="h" style="margin:0"></h2><p id="sub" style="color:#64748b;margin:4px 0 20px"></p>
+<p id="info" style="margin:-8px 0 16px"></p>
 <p id="cur" style="margin:-8px 0 16px;font-weight:600"></p>
 <div id="btns"></div><p id="msg" style="font-weight:600"></p>
 <script>
@@ -24,16 +25,17 @@ function status() { // read-only: what is currently logged for this invoice, so 
   }).catch(function () {});
 }
 function go(a) {
-  var d = $("d") ? $("d").value : ""; $("msg").textContent = "Saving...";
-  fetch(API, { method: "POST", body: JSON.stringify({ t: T, a: a, d: d }), headers: { "Content-Type": "text/plain" } })
+  var d = $("d") ? $("d").value : "", m = $("n") ? $("n").value : ""; $("msg").textContent = "Saving...";
+  fetch(API, { method: "POST", body: JSON.stringify({ t: T, a: a, d: d, m: m }), headers: { "Content-Type": "text/plain" } })
     .then(function (r) { return r.json(); })
-    .then(function (j) { $("msg").textContent = (j.ok ? "" : "Not saved: ") + j.msg; if (j.ok) { armed = false; if ($("dead")) $("dead").textContent = DEAD; status(); } })
+    .then(function (j) { $("msg").textContent = (j.ok ? "" : "Not saved: ") + j.msg; if (j.ok) { armed = false; if ($("n")) $("n").value = ""; if ($("dead")) $("dead").textContent = DEAD; status(); } })
     .catch(function () { $("msg").textContent = "Not saved: could not reach the server. Check your connection and tap again."; });
 }
 if (!P || !P.n || (P.e && P.e < new Date().toISOString().slice(0, 10))) {
   $("h").textContent = "Link invalid or expired"; $("sub").textContent = "Use the link in today's collections email.";
 } else {
   $("h").textContent = "Invoice " + P.n; $("sub").textContent = P.o + " · " + P.r;
+  if (P.c) $("info").innerHTML = "<b></b><br><span></span>", $("info").firstChild.textContent = P.c, $("info").lastChild.textContent = "₦" + Number(P.a || 0).toLocaleString("en-NG") + " outstanding";
   status();
   if (P.k === "p") {
     $("btns").insertAdjacentHTML("beforebegin", "<p>Reminders are paused for this invoice.</p>");
@@ -42,6 +44,7 @@ if (!P || !P.n || (P.e && P.e < new Date().toISOString().slice(0, 10))) {
     $("btns").insertAdjacentHTML("beforebegin", "<p>This invoice is still a draft. Finance issues it; you cannot change it.</p>");
     btn("Client is waiting", function () { go("urgent"); });
   } else {
+    $("btns").insertAdjacentHTML("beforeend", '<textarea id="n" maxlength="300" placeholder="Note (optional): what the client said" style="font-size:16px;padding:8px;width:100%;box-sizing:border-box;height:70px"></textarea>');
     btn("Chasing", function () { go("chasing"); });
     $("btns").insertAdjacentHTML("beforeend", '<label style="display:block;margin:12px 0 4px">Promised to pay on</label>' +
       '<input type="date" id="d" style="font-size:16px;padding:8px;width:100%;box-sizing:border-box">');

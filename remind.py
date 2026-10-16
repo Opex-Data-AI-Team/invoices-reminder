@@ -11,13 +11,14 @@ import io
 import json
 import os
 import smtplib
+import statistics
 import ssl
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections import defaultdict
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time as dtime, timedelta, timezone
 from email.message import EmailMessage
 from html import escape as esc
 
@@ -28,7 +29,12 @@ FY_START_MONTH = 1  # fiscal year start (1 = calendar year); collection rate run
 DRAFT_GRACE = 3  # days before a never-sent draft is flagged
 STALE_DRAFT_DAYS = 30  # older drafts leave the daily emails; finance gets them in a weekly (Monday) list
 STALE_LIST_MAX = 40  # cap on the Monday dormant-opportunity list
+WA_MAX_INVOICES = 3  # invoices per WhatsApp message: signed links are long and wa.me URLs inside emails have a length limit
+COUNTRY_CODE = "234"  # Nigeria: a local number like 0803... becomes 234803...
 LINK_DAYS = 14  # how long a "Log update" link stays valid
+IGNORE_DAYS = 3  # working days with no tap after the first email -> tier goes up one step (manager Cc'd a tier early)
+HISTORY_DAYS = 60  # how much of the Log tab feeds the rules
+SCORE_DAYS = 30  # window for the manager scorecard
 DEFAULT_SEND_CAP = 400  # abort a run that would send more than this (Gmail allows ~500/day on free accounts)
 UN = "(unassigned)"
 TIERS = [(21, "decision"), (14, "blunt"), (7, "firm"), (0, "coach")]
@@ -73,8 +79,103 @@ def classify(inv):
     return "paid" if st == "paid" or inv["balance"] <= 0 else "open"
 
 
-def build(invs_by_org, rep_of, follow, today, reps=None, paused=None):
-    """paused: optional list that receives invoices a rep set to Dead, so they can be resumed from the email without touching the sheet."""
+# ---------- response history (Log tab) -> escalation rule and scorecard ----------
+def log_ts(s):
+    """Log timestamp -> datetime; tolerates Sheets turning the text into a locale date. None if unreadable."""
+    s = (s or "").strip()
+    for fmt, text in (("%Y-%m-%dT%H:%M:%S", s[:19]), ("%Y-%m-%d", s[:10]), ("%m/%d/%Y %H:%M:%S", s), ("%m/%d/%Y", s)):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            pass
+    return None
+
+
+def log_key(org, number):
+    return (org.strip().lower(), number.strip())
+
+
+def sent_keys(r):
+    """A 'sent' Log row lists its invoices as 'Org|Number, Org|Number'."""
+    return [log_key(*k.split("|", 1)) for k in (r.get("invoice") or "").split(", ") if "|" in k]
+
+
+def parse_history(rows, today):
+    """-> {'last_tap': {key: date}, 'first_sent': {key: date}} over the last HISTORY_DAYS."""
+    cut = datetime.combine(today - timedelta(days=HISTORY_DAYS), dtime.min)
+    last_tap, first_sent = {}, {}
+    for r in sorted(rows, key=lambda r: log_ts(r.get("ts")) or datetime.min):
+        ts = log_ts(r.get("ts"))
+        if not ts or ts < cut:
+            continue
+        if r.get("type") == "tap":
+            last_tap[log_key(r.get("org") or "", r.get("invoice") or "")] = ts.date()
+        elif r.get("type") == "sent":
+            for k in sent_keys(r):
+                first_sent.setdefault(k, ts.date())
+    return dict(last_tap=last_tap, first_sent=first_sent)
+
+
+def workdays_since(start, today):
+    return sum(1 for n in range(1, (today - start).days + 1) if is_workday(start + timedelta(days=n)))
+
+
+def silent_days(history, org, number, today):
+    """Working days since the rep last tapped this invoice (or since it was first emailed). 0 when unknown."""
+    if not history:
+        return 0
+    k = log_key(org, number)
+    starts = [x for x in (history["last_tap"].get(k), history["first_sent"].get(k)) if x]
+    return workdays_since(max(starts), today) if starts else 0
+
+
+def scorecard(rows, open_keys, today):
+    """Per rep and '__team__' over the last SCORE_DAYS: how many emailed invoices got a tap, how fast, and promises kept.
+    A promise counts once its date has passed; it is kept when the invoice is no longer open in Zoho."""
+    cut = datetime.combine(today - timedelta(days=SCORE_DAYS), dtime.min)
+    sent, taps, promise = {}, defaultdict(list), {}
+    for r in sorted(rows, key=lambda r: log_ts(r.get("ts")) or datetime.min):
+        ts, rep = log_ts(r.get("ts")), (r.get("rep") or "").strip()
+        if not ts or ts < cut or not rep:
+            continue
+        if r.get("type") == "sent":
+            for k in sent_keys(r):
+                sent.setdefault((rep, k), ts)
+        elif r.get("type") == "tap":
+            k = log_key(r.get("org") or "", r.get("invoice") or "")
+            taps[(rep, k)].append(ts)
+            if r.get("action") == "promised":
+                promise[(rep, k)] = log_ts(r.get("detail"))  # latest promise per invoice wins
+    out = defaultdict(lambda: dict(sent=0, acks=[], promises=0, kept=0))
+    for (rep, k), t0 in sent.items():
+        first = next((t for t in taps.get((rep, k), []) if t >= t0), None)
+        for who in (rep, "__team__"):
+            out[who]["sent"] += 1
+            if first:
+                out[who]["acks"].append((first - t0).total_seconds() / 86400)
+    for (rep, k), due in promise.items():
+        if due and due.date() < today:
+            for who in (rep, "__team__"):
+                out[who]["promises"] += 1
+                out[who]["kept"] += k not in open_keys
+    return {w: dict(sent=v["sent"], rate=len(v["acks"]) / v["sent"] * 100 if v["sent"] else None,
+                    ack=statistics.median(v["acks"]) if v["acks"] else None,
+                    kept=v["kept"] / v["promises"] * 100 if v["promises"] else None, promises=v["promises"])
+            for w, v in out.items()}
+
+
+def score_cells(s):
+    """-> (responded, median time to first tap, promises kept) as display strings."""
+    if not s:
+        return "n/a", "n/a", "n/a"
+    return (fp(s["rate"]), "n/a" if s["ack"] is None else f"{s['ack']:.1f}d",
+            "n/a" if s["kept"] is None else f"{fp(s['kept'])} of {s['promises']}")
+
+
+def build(invs_by_org, rep_of, follow, today, reps=None, paused=None, promised=None, history=None):
+    """paused: optional list that receives invoices a rep set to Dead, so they can be resumed from the email without touching the sheet.
+    promised: optional list that receives invoices with a live (future-dated) promise; they leave the nagging list until the date passes.
+    history: optional parse_history() result; invoices with no tap for IGNORE_DAYS working days go up one tier."""
     known = {r.lower(): r for r in reps} if reps is not None else None  # None: trust Zoho salesperson as-is
     items = []
     stats = defaultdict(lambda: [0.0, 0.0, 0])  # key -> [invoiced, paid, count]
@@ -112,20 +213,29 @@ def build(invs_by_org, rep_of, follow, today, reps=None, paused=None):
             fu = follow.get((org.lower(), i["invoice_number"]), {})
             status = (fu.get("Status") or "").strip().lower()
             urgent = status == "client waiting"
-            promised = (fu.get("Promised pay date") or "").strip()
+            promised_on = (fu.get("Promised pay date") or "").strip()
             broken = False
             if status == "dead":
                 if paused is not None and kind == "open":
                     paused.append(dict(rep=rep, org=org, number=i["invoice_number"], client=i["customer_name"], balance=i["balance"],
                                        kind=kind, days=days, paused=True))
                 continue
-            if status == "promised" and promised and d(promised) < today:
-                broken = True  # a promise no longer pauses reminders; only a missed one escalates
+            if status == "promised" and promised_on:
+                if d(promised_on) < today:
+                    broken = True  # a promise no longer pauses reminders; only a missed one escalates
+                elif promised is not None and kind == "open":
+                    promised.append(dict(rep=rep, org=org, number=i["invoice_number"], client=i["customer_name"], balance=i["balance"],
+                                         kind=kind, days=days, promise=promised_on))
+                    continue
             t = tier(days)
             if broken and ORDER.index(t) < ORDER.index("blunt"):
                 t = "blunt"
+            silent = silent_days(history, org, i["invoice_number"], today) if kind == "open" else 0
+            ignored = silent >= IGNORE_DAYS
+            if ignored:
+                t = ORDER[min(ORDER.index(t) + 1, len(ORDER) - 1)]
             items.append(dict(rep=rep, org=org, number=i["invoice_number"], client=i["customer_name"],
-                              balance=i["balance"], kind=kind, days=days, tier=t, broken=broken,
+                              balance=i["balance"], kind=kind, days=days, tier=t, broken=broken, ignored=ignored, silent=silent,
                               note=fu.get("Rep note", ""), urgent=urgent, created_by=(i.get("created_by") or "").strip(),
                               url=(i.get("invoice_url") or "").strip()))
     return items, stats, outst, oldest
@@ -161,12 +271,51 @@ def line(it, links=True):
     what = f"NOT YET BILLED (draft, {it['days']}d old)" if draft else when(it["days"])
     extra = "  ** BROKEN PROMISE **" if it["broken"] else ""
     extra += "  ** CLIENT WAITING **" if it["urgent"] else ""
+    extra += f"  ** NO RESPONSE LOGGED, {it['silent']} working days **" if it.get("ignored") else ""
     out = f"- {it['org']} {it['number']} {it['client']}: NGN {it['balance']:,.0f}, {what}{extra}"
     if links and it.get("url"):
         out += f"\n    View: {it['url']}"
     if links and it.get("link") and not it["urgent"]:
         out += f"\n    {'Client is waiting' if draft else 'Update'}: {it['link']}"
     return out
+
+
+def wa_number(raw):
+    n = "".join(c for c in (raw or "") if c.isdigit())
+    return COUNTRY_CODE + n[1:] if n.startswith("0") else n
+
+
+def wa_links(reps, items):
+    """Manager's WhatsApp buttons: [(rep, wa.me url, open invoices, no-response count)], neediest rep first.
+    Each message carries the rep's most overdue invoices with their Log update links."""
+    out = []
+    for rep, row in reps.items():
+        num = wa_number(row.get("WhatsApp"))
+        mine = sorted((i for i in items if i["rep"] == rep and i["kind"] != "draft"), key=lambda i: -i["days"])
+        if not (num and mine):
+            continue
+        lines = [f"Hi {rep.split()[0]}, {len(mine)} invoice(s) still need a status update. Tap each link and log where it stands:"]
+        for i in mine[:WA_MAX_INVOICES]:
+            lines += ["", f"{i['client']}, NGN {i['balance']:,.0f}, {when(i['days'])}"] + ([i["link"]] if i.get("link") else [])
+        if len(mine) > WA_MAX_INVOICES:
+            lines += ["", f"+{len(mine) - WA_MAX_INVOICES} more in your email."]
+        out.append((rep, f"https://wa.me/{num}?text={urllib.parse.quote(chr(10).join(lines))}", len(mine), sum(1 for i in mine if i.get("ignored"))))
+    return sorted(out, key=lambda w: (-w[3], -w[2]))
+
+
+def wa_group(reps, items):
+    """One message for the reps' WhatsApp group: a line per rep, no invoice links or client names (links are signed to one rep, the group sees everyone).
+    wa.me/?text= makes WhatsApp ask which chat to send to. '' when nobody has open invoices."""
+    lines = []
+    for rep in reps:
+        mine = [i for i in items if i["rep"] == rep and i["kind"] != "draft"]
+        if mine:
+            quiet = sum(1 for i in mine if i.get("ignored"))
+            lines.append(f"*{rep}*: {len(mine)} invoice(s) need a status update" + (f", {quiet} with no response logged" if quiet else ""))
+    if not lines:
+        return ""
+    text = "\n".join(["Collections: please log where your invoices stand today. Open the link in your email and tap Log update.", "", *lines])
+    return f"https://wa.me/?text={urllib.parse.quote(text)}"
 
 
 def stats_block(rep, items, stats, outst, oldest):
@@ -181,7 +330,7 @@ def stats_block(rep, items, stats, outst, oldest):
     return "\n".join(lines)
 
 
-def compose_rep(rep, items, stats, outst, oldest, paused=()):
+def compose_rep(rep, items, stats, outst, oldest, paused=(), promised=()):
     open_, drafts, _ = split(items)
     worst = max((i["tier"] for i in open_), key=ORDER.index) if open_ else None
     first = rep.split()[0]
@@ -196,6 +345,10 @@ def compose_rep(rep, items, stats, outst, oldest, paused=()):
                   *[line(i) for i in sorted(drafts, key=lambda i: -i["days"])]]
         if any(i.get("link") for i in drafts):
             parts += ["If a client is expecting one, tap Client is waiting so finance prioritises it."]
+    promised = [i for i in promised if i.get("link")]
+    if promised:
+        parts += ["", f"Promised ({len(promised)}): the client promised to pay. No chasing until the date; tap Update if it changes.",
+                  *[f"- {i['org']} {i['number']} {i['client']}: NGN {i['balance']:,.0f}, promised {i['promise']}\n    Update: {i['link']}" for i in promised]]
     paused = [i for i in paused if i.get("link")]
     if paused:
         parts += ["", f"Paused ({len(paused)}): reminders are off for these. Tap Resume to turn them back on.",
@@ -213,8 +366,10 @@ def draft_sections(items, today):
     return recent, stale, (stale[:STALE_LIST_MAX] if show_stale else [])
 
 
-def compose_manager(items, stats, reps, today=None):
+def compose_manager(items, stats, reps, today=None, score=None):
     rows = [f"- {r}: rate {fp(pct(stats.get(r)))}" for r in reps]
+    cells = lambda w: "responded {}, median first tap {}, promises kept {}".format(*score_cells((score or {}).get(w)))  # noqa: E731
+    score_rows = [f"- {w if w != '__team__' else 'Team'}: {cells(w)}" for w in [*reps, "__team__"]] if score is not None else []
     open_ = [i for i in items if i["kind"] != "draft"]
     hot = [i for i in open_ if ORDER.index(i["tier"]) >= ORDER.index("blunt") or i["rep"] == UN]
     recent, stale, stale_shown = draft_sections(items, today)
@@ -223,6 +378,7 @@ def compose_manager(items, stats, reps, today=None):
         f"Team collection rate (fiscal year): {fp(pct(stats.get('__team__')))}",
         pipeline(stats, lambda x: f"NGN {x:,.0f}"),
         "By rep:", *rows, "",
+        *(["Rep response, last %d days:" % SCORE_DAYS, *score_rows, ""] if score_rows else []),
         "Orgs: " + ", ".join(f"{k[4:]} {fp(pct(v))}" for k, v in sorted(stats.items()) if k.startswith("org:")), "",
         "Escalations / unassigned:", *([f"- ({i['rep']}, {i['tier']}) " + line(i, links=False)[2:] for i in hot] or ["- none"]), "",
         f"Drafts for finance to issue ({len(recent)}; client-waiting first):", *([dline(i) for i in recent] or ["- none"]), "",
@@ -301,6 +457,7 @@ def status_pills(it, links=True):
     p = pill(f"Not yet billed ({it['days']}d)" if draft else when(it["days"]).capitalize(), "#64748b" if draft else TIER_COLOR[it["tier"]])
     p += " " + pill("Broken promise", "#dc2626") if it["broken"] else ""
     p += " " + pill("Client waiting", "#d97706") if it["urgent"] else ""
+    p += " " + pill(f"No response ({it['silent']} working days)", "#7c3aed") if it.get("ignored") else ""
     if links and it.get("link") and not it["urgent"]:
         p += (f'<br><a href="{esc(it["link"])}" style="display:inline-block;margin-top:8px;padding:6px 12px;background:{INK};'
               f'color:#fff;border-radius:6px;font-size:12px;font-weight:600;text-decoration:none">{"Client is waiting" if draft else "Log update"}</a>')
@@ -334,16 +491,17 @@ def steps(texts):
     return f'<table cellpadding="0" cellspacing="0" width="100%">{"".join(out)}</table>'
 
 
-def paused_table(paused):
-    rows = [f'<tr><td style="padding:8px"><b>{esc(i["number"])}</b><br><span style="font-size:12px;color:{MUTED}">{esc(i["org"])}</span></td>'
+def paused_table(paused):  # also used for promised invoices: i["promise"] shows under the number, i["btn"] names the button
+    rows = [f'<tr><td style="padding:8px"><b>{esc(i["number"])}</b><br><span style="font-size:12px;color:{MUTED}">{esc(i["org"])}{" &middot; promised " + esc(i["promise"]) if i.get("promise") else ""}</span></td>'
             f'<td style="padding:8px">{esc(i["client"])}</td><td align="right" style="padding:8px"><b>{money(i["balance"])}</b></td>'
             f'<td align="right" style="padding:8px"><a href="{esc(i["link"])}" style="display:inline-block;padding:6px 12px;background:#fff;color:{INK};'
-            f'border:1px solid {INK};border-radius:6px;font-size:12px;font-weight:600;text-decoration:none">Resume</a></td></tr>' for i in paused]
+            f'border:1px solid {INK};border-radius:6px;font-size:12px;font-weight:600;text-decoration:none">{"Update" if i.get("promise") else "Resume"}</a></td></tr>' for i in paused]
     return table([("Invoice", "left"), ("Client", "left"), ("Balance", "right"), ("", "right")], rows)
 
 
-def html_rep(rep, items, stats, outst, oldest, today, paused=()):
+def html_rep(rep, items, stats, outst, oldest, today, paused=(), promised=()):
     paused = [i for i in paused if i.get("link")]
+    promised = [i for i in promised if i.get("link")]
     open_, drafts, _ = split(items)
     worst = max((i["tier"] for i in open_), key=ORDER.index) if open_ else None
     s, team = stats.get(rep), pct(stats.get("__team__"))
@@ -368,13 +526,16 @@ def html_rep(rep, items, stats, outst, oldest, today, paused=()):
         *([row(heading(f"Waiting on billing ({len(drafts)})")
                + f'<div style="font-size:13px;color:{MUTED};margin-bottom:10px">Finance issues these. Nothing for you to fix; tap <b>Client is waiting</b> if the client is expecting one.</div>'
                + action_table(drafts))] if drafts else []),
+        *([row(heading(f"Promised ({len(promised)})")
+               + f'<div style="font-size:13px;color:{MUTED};margin-bottom:10px">The client promised to pay. No chasing until the date; tap <b>Update</b> if it changes.</div>'
+               + paused_table(promised))] if promised else []),
         *([row(heading(f"Paused ({len(paused)})")
                + f'<div style="font-size:13px;color:{MUTED};margin-bottom:10px">Reminders are off for these. Tap <b>Resume</b> to turn them back on.</div>'
                + paused_table(paused))] if paused else []),
     ])
 
 
-def html_manager(items, stats, reps, today):
+def html_manager(items, stats, reps, today, score=None, wa=(), group=""):
     team = pct(stats.get("__team__"))
     open_ = [i for i in items if i["kind"] != "draft"]
     urgent = [i for i in open_ if ORDER.index(i["tier"]) >= ORDER.index("blunt")]
@@ -392,6 +553,9 @@ def html_manager(items, stats, reps, today):
         rep_rows.append(f'<tr><td style="padding:9px 8px;border-bottom:1px solid {LINE}">{esc(r)}</td>'
                         f'<td width="45%" style="padding:9px 8px;border-bottom:1px solid {LINE}">{bar(p, rate_color(p))}</td>'
                         f'<td align="right" style="padding:9px 8px;border-bottom:1px solid {LINE}"><b style="color:{rate_color(p)}">{fp(p)}</b></td></tr>')
+    score_rows = [f'<tr><td style="padding:9px 8px;border-bottom:1px solid {LINE}">{"<b>Team</b>" if w == "__team__" else esc(w)}</td>'
+                  + "".join(f'<td align="right" style="padding:9px 8px;border-bottom:1px solid {LINE}">{c}</td>' for c in score_cells(score.get(w)))
+                  + '</tr>' for w in [*reps, "__team__"]] if score is not None else []
     esc_html = (action_table(hot, with_rep=True, links=False) if hot
                 else '<div style="color:#16a34a;font-weight:600">All clear. Nothing escalated.</div>')
     note = lambda t: f'<div style="font-size:13px;color:{MUTED};margin-bottom:10px">{t}</div>'  # noqa: E731
@@ -401,6 +565,18 @@ def html_manager(items, stats, reps, today):
         row(kpis, pad="0", border=False),
         row(f'<span style="font-size:12px;color:{MUTED}">Org rates: {orgs} &nbsp;|&nbsp; {pipeline(stats, money)}</span>', pad="12px 28px", bg="#f8fafc"),
         row(heading("Collection rate by rep") + table([("Rep", "left"), ("", "left"), ("Rate", "right")], rep_rows)),
+        *([row(heading(f"Rep response, last {SCORE_DAYS} days")
+               + table([("Rep", "left"), ("Responded", "right"), ("Median first tap", "right"), ("Promises kept", "right")], score_rows)
+               + note("Responded: emailed invoices that got a Log update tap. Promises kept: promised dates that passed with the invoice no longer open."))]
+          if score_rows else []),
+        *([row(heading("Nudge on WhatsApp")
+               + (note("<b>Whole group:</b> opens WhatsApp, pick the reps' group, then Send. To buzz a rep, type @ over their bold name.")
+                  + f'<a href="{esc(group)}" style="display:inline-block;margin:0 0 14px;padding:10px 18px;background:#15803d;color:#fff;border-radius:6px;'
+                    'font-size:14px;font-weight:700;text-decoration:none">Post to the reps group</a>' if group else "")
+               + (note("<b>One rep, with their update links</b> (private chat, then Send). No-response reps first.") if wa else "")
+               + "".join(f'<a href="{esc(u)}" style="display:inline-block;margin:0 8px 8px 0;padding:8px 14px;background:#16a34a;color:#fff;border-radius:6px;'
+                         f'font-size:13px;font-weight:600;text-decoration:none">{esc(r)} &middot; {n}{f" ({k} no response)" if k else ""}</a>' for r, u, n, k in wa))]
+          if wa or group else []),
         row(heading("Escalations and unassigned") + esc_html),
         row(heading(f"Drafts for finance to issue ({len(recent)})")
             + (note("Client-waiting first, then oldest.") + action_table(recent, with_rep=True, links=False, keep_order=True)
@@ -421,7 +597,7 @@ def add_links(items, url, secret, today):
     exp = (today + timedelta(days=LINK_DAYS)).isoformat()
     for i in items:
         if i["rep"] != UN:  # unassigned has no rep to attribute a tap to
-            payload = dict(r=i["rep"], o=i["org"], n=i["number"], e=exp)
+            payload = dict(r=i["rep"], o=i["org"], n=i["number"], e=exp, c=i["client"], a=round(i["balance"]))  # c/a: shown on the tap page; signed, so not forgeable
             if i["kind"] == "draft":
                 payload["k"] = "d"  # draft token: the page offers only "Client is waiting"
             elif i.get("paused"):
@@ -624,27 +800,35 @@ def main():
     rep_of = {(c["Organization"].strip().lower(), c["Client name"].strip().lower()): c["Rep"].strip()
               for c in clients if c["Rep"].strip() in reps}
     paused = []
-    items, stats, outst, oldest = build(invs, rep_of, follow, today, reps, paused)
+    phase2 = os.environ.get("PHASE2") == "1" and os.environ.get("LOG_SRC")  # response-aware rules + scorecard; off until the shadow run is reviewed
+    log_rows = read_csv(os.environ["LOG_SRC"]) if phase2 else []
+    promised = [] if phase2 else None
+    items, stats, outst, oldest = build(invs, rep_of, follow, today, reps, paused, promised, parse_history(log_rows, today) if phase2 else None)
+    open_keys = {log_key(o, i["invoice_number"]) for o, lst in invs.items() for i in lst if classify(i) == "open"}
+    score = scorecard(log_rows, open_keys, today) if phase2 else None
     if os.environ.get("DIAGNOSE") == "1":
         return diagnose(invs, reps_rows, clients, follow, reps, rep_of, items)
     url, secret = os.environ.get("APPS_SCRIPT_URL"), os.environ.get("LINK_SECRET")
     if url and secret:
         # LINK_PAGE_URL: static page that calls Apps Script via fetch, so Google's /u/N/ account redirect never hits the rep's phone
-        add_links(items + paused, (os.environ.get("LINK_PAGE_URL") or url).strip(), secret, today)
+        add_links(items + paused + (promised or []), (os.environ.get("LINK_PAGE_URL") or url).strip(), secret, today)
     msgs, by_rep = [], {}
     for rep, row in reps.items():
+        if os.environ.get("MANAGERS_ONLY") == "1":  # shadow run: managers see the new rules, reps are untouched
+            break
         mine = [i for i in items if i["rep"] == rep and not (i["kind"] == "draft" and i["days"] >= STALE_DRAFT_DAYS)]
         if not mine:  # dormant drafts go to management as opportunities, not to reps
             continue
         by_rep[rep] = mine
         mine_paused = [i for i in paused if i["rep"] == rep]
-        subj, body, escalate = compose_rep(rep, mine, stats, outst, oldest, mine_paused)
+        mine_promised = [i for i in promised or [] if i["rep"] == rep]
+        subj, body, escalate = compose_rep(rep, mine, stats, outst, oldest, mine_paused, mine_promised)
         boss = next((m for m in managers if m["Rep"].strip() == row["Manager"].strip()), managers[0] if managers else None)
         msgs.append((row["Email"], boss["Email"] if escalate and boss else "", subj, body,
-                     html_rep(rep, mine, stats, outst, oldest, today, mine_paused)))
+                     html_rep(rep, mine, stats, outst, oldest, today, mine_paused, mine_promised)))
     if managers:
-        subj, body = compose_manager(items, stats, list(reps), today)
-        page = html_manager(items, stats, list(reps), today)
+        subj, body = compose_manager(items, stats, list(reps), today, score)
+        page = html_manager(items, stats, list(reps), today, score, wa_links(reps, items), wa_group(reps, items))
         msgs += [(m["Email"], "", subj, body, page) for m in managers]
     send = os.environ.get("SEND") == "1"
     cap = int(os.environ.get("DAILY_SEND_CAP") or DEFAULT_SEND_CAP)

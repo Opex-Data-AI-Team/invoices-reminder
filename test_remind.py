@@ -263,6 +263,75 @@ def test_paused_invoices_can_be_resumed_from_the_email():
     assert "Paused (" not in compose_rep("Ann", [i for i in items if i["rep"] == "Ann"], stats, outst, oldest)[1]
 
 
+def test_live_promise_leaves_nagging_list_only_when_phase2_on():
+    promised = []
+    items, *_ = build(INVS, REP_OF, FOLLOW, TODAY, promised=promised)
+    assert "I8" not in {i["number"] for i in items} and [(i["number"], i["promise"]) for i in promised] == [("I8", "2026-10-10")]
+    assert "I9" in {i["number"] for i in items}  # missed promise still escalates
+
+
+def hist(rows):
+    from remind import parse_history
+    return parse_history(rows, TODAY)
+
+
+def test_ignored_invoice_goes_up_one_tier_and_a_tap_resets_the_clock():
+    sent = dict(ts="2026-10-01T09:00:00", type="sent", rep="Bob", invoice="Org|I5, Org|I2")  # Thu; 3 working days by Tue
+    items, *_ = build(INVS, REP_OF, FOLLOW, TODAY, history=hist([sent]))
+    got = {i["number"]: i for i in items}
+    assert got["I5"]["ignored"] and got["I5"]["tier"] == "firm" and got["I5"]["silent"] == 3   # coach -> firm
+    assert got["I2"]["tier"] == "decision"                                                    # blunt -> decision
+    tap = dict(ts="2026-10-05T10:00:00", type="tap", rep="Ann", org="Org", invoice="I2", action="chasing")
+    got = {i["number"]: i for i in build(INVS, REP_OF, FOLLOW, TODAY, history=hist([sent, tap]))[0]}
+    assert not got["I2"]["ignored"] and got["I2"]["tier"] == "blunt"
+    assert not any(i["ignored"] for i in build(INVS, REP_OF, FOLLOW, TODAY)[0])               # no history: rules off
+
+
+def test_scorecard_response_ack_and_promises_kept():
+    from remind import scorecard, score_cells, compose_manager, html_manager
+    rows = [dict(ts="2026-10-01T09:00:00", type="sent", rep="Ann", invoice="Org|I2, Org|I3"),
+            dict(ts="2026-10-01T15:00:00", type="tap", rep="Ann", org="Org", invoice="I2", action="chasing"),
+            dict(ts="2026-10-02T09:00:00", type="tap", rep="Bob", org="Org", invoice="I7", action="promised", detail="2026-10-02"),
+            dict(ts="2026-10-02T09:01:00", type="tap", rep="Bob", org="Org", invoice="I5", action="promised", detail="2026-10-03"),
+            dict(ts="2026-10-02T09:02:00", type="tap", rep="Bob", org="Org", invoice="I8", action="promised", detail="2026-10-20")]  # not matured
+    sc = scorecard(rows, {("org", "I5"), ("org", "I8")}, TODAY)
+    assert sc["Ann"]["rate"] == 50 and round(sc["Ann"]["ack"], 2) == 0.25
+    assert sc["Bob"]["promises"] == 2 and sc["Bob"]["kept"] == 50                             # I7 paid, I5 still open
+    assert score_cells(sc["Ann"]) == ("50%", "0.2d", "n/a")
+    items, stats, *_ = run()
+    assert "Rep response" in compose_manager(items, stats, ["Ann", "Bob"], TODAY, sc)[1]
+    assert "Median first tap" in html_manager(items, stats, ["Ann", "Bob"], TODAY, sc)
+    assert "Rep response" not in compose_manager(items, stats, ["Ann", "Bob"], TODAY)[1]       # phase 2 off: unchanged
+
+
+def test_promised_section_in_rep_email():
+    from remind import add_links
+    promised = []
+    items, stats, outst, oldest = build(INVS, REP_OF, FOLLOW, TODAY, promised=promised)
+    add_links(items + promised, "https://x.test/", "k", TODAY)
+    bob = [i for i in items if i["rep"] == "Bob"]
+    assert "Promised (1)" in compose_rep("Bob", bob, stats, outst, oldest, (), promised)[1]
+    assert "promised 2026-10-10" in html_rep("Bob", bob, stats, outst, oldest, TODAY, (), promised)
+
+
+def test_whatsapp_buttons_for_manager():
+    from remind import add_links, html_manager, wa_links, wa_number
+    assert wa_number("+234 803-000 0001") == "2348030000001" and wa_number("08030000001") == "2348030000001"
+    items, stats, *_ = run()
+    add_links(items, "https://x.test/", "k", TODAY)
+    wa = wa_links({"Ann": {"WhatsApp": "08030000001"}, "Bob": {"WhatsApp": ""}, "Cy": {"WhatsApp": "+2348000000002"}}, items)
+    assert [w[0] for w in wa] == ["Ann"]                      # Bob has no number, Cy has no open invoices
+    assert wa[0][1].startswith("https://wa.me/2348030000001?text=") and "x.test" in wa[0][1] and "%0A" in wa[0][1]
+    assert "Nudge on WhatsApp" in html_manager(items, stats, ["Ann", "Bob"], TODAY, None, wa)
+    assert "WhatsApp" not in html_manager(items, stats, ["Ann", "Bob"], TODAY)
+    from remind import wa_group
+    from urllib.parse import unquote
+    g = wa_group(["Ann", "Bob", "Cy"], items)
+    assert g.startswith("https://wa.me/?text=") and "*Ann*: " in unquote(g) and "Cy" not in unquote(g) and "x.test" not in g   # no links in the group message
+    assert "Post to the reps group" in html_manager(items, stats, ["Ann", "Bob"], TODAY, None, (), g)
+    assert wa_group(["Cy"], items) == ""
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

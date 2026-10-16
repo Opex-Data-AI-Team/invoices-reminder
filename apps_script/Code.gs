@@ -63,9 +63,11 @@ function doGet(e) {
     '<body style="font-family:Segoe UI,Arial,sans-serif;max-width:420px;margin:0 auto;padding:20px">' +
     '<h2 style="margin:0">Invoice <?= num ?></h2>' +
     '<p style="color:#64748b;margin:4px 0 20px"><?= org ?> &middot; <?= rep ?></p>' +
+    '<? if (client) { ?><p style="margin:-8px 0 16px"><b><?= client ?></b><br>&#8358;<?= amount ?> outstanding</p><? } ?>' +
     '<div id="btns">' +
     '<? if (draft) { ?><p>This invoice is still a draft. Finance issues it; you cannot change it.</p>' +
     '<button onclick="go(\'urgent\')">Client is waiting</button><? } else { ?>' +
+    '<textarea id="n" maxlength="300" placeholder="Note (optional): what the client said" style="font-size:16px;padding:8px;width:100%;box-sizing:border-box;height:70px"></textarea>' +
     '<button onclick="go(\'chasing\')">Chasing</button>' +
     '<label style="display:block;margin:12px 0 4px">Promised to pay on</label>' +
     '<input type="date" id="d" style="font-size:16px;padding:8px;width:100%;box-sizing:border-box">' +
@@ -78,16 +80,16 @@ function doGet(e) {
     'border:1px solid #0f172a;background:#0f172a;color:#fff}</style>' +
     '<script>var T=<?!= tok ?>,armed=false;' +
     'function dead(){var b=document.getElementById("dead");if(!armed){armed=true;b.textContent="Tap again to confirm: pause reminders";return;}go("dead");}' +
-    'function go(a){var e=document.getElementById("d"),d=e?e.value:"";document.getElementById("msg").textContent="Saving...";' +
+    'function go(a){var e=document.getElementById("d"),d=e?e.value:"",n=document.getElementById("n"),m=n?n.value:"";document.getElementById("msg").textContent="Saving...";' +
     'google.script.run.withSuccessHandler(function(m){document.getElementById("btns").style.display="none";' +
     'document.getElementById("msg").textContent=m;}).withFailureHandler(function(x){document.getElementById("msg").textContent=' +
-    '"Not saved: "+x.message;}).logUpdate(T,a,d);}</script></body>');
-  t.num = p.n; t.org = p.o; t.rep = p.r; t.draft = p.k === 'd'; t.tok = JSON.stringify(e.parameter.t);
+    '"Not saved: "+x.message;}).logUpdate(T,a,d,m);}</script></body>');
+  t.client = p.c || ''; t.amount = String(Math.round(p.a || 0)).replace(/\B(?=(\d{3})+$)/g, ','); t.num = p.n; t.org = p.o; t.rep = p.r; t.draft = p.k === 'd'; t.tok = JSON.stringify(e.parameter.t);
   return page_(t.evaluate().getContent());
 }
 
 /** Called by the page. Re-verifies the token; the browser is never trusted. */
-function logUpdate(token, action, date) {
+function logUpdate(token, action, date, note) {
   var p = verifyToken_(token);
   if (!p) throw new Error('Link invalid or expired');
   if (!ACTIONS.hasOwnProperty(action)) throw new Error('Unknown action');
@@ -96,10 +98,11 @@ function logUpdate(token, action, date) {
     var max = Utilities.formatDate(new Date(Date.now() + 60 * 864e5), TZ, 'yyyy-MM-dd');
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date || '') || date < today_() || date > max) throw new Error('Pick a date within the next 60 days');
   } else { date = ''; }
+  note = String(note || '').trim().slice(0, 300);
   var lock = LockService.getScriptLock();
   lock.waitLock(20000);
   try {
-    upsertFollowup_(p.o, p.n, ACTIONS[action], date);
+    upsertFollowup_(p.o, p.n, ACTIONS[action], date, note);
     appendLog_([{ id: 'tap:' + Utilities.getUuid(), type: 'tap', rep: p.r, org: p.o, invoice: p.n,
       action: action, detail: date }]);
   } finally { lock.releaseLock(); }
@@ -110,7 +113,7 @@ function followLookup_(org, inv) { // -> {sh, data, c, row}; row is the 1-based 
   var sh = ss_().getSheetByName(FOLLOWUPS);
   var data = sh.getDataRange().getValues();
   var h = data[0].map(function (x) { return String(x).trim(); });
-  var c = { org: h.indexOf('Organization'), inv: h.indexOf('Invoice'), st: h.indexOf('Status'), dt: h.indexOf('Promised pay date') };
+  var c = { org: h.indexOf('Organization'), inv: h.indexOf('Invoice'), st: h.indexOf('Status'), dt: h.indexOf('Promised pay date'), note: h.indexOf('Rep note') };
   if (c.org < 0 || c.inv < 0 || c.st < 0 || c.dt < 0) throw new Error('Followups tab is missing a required column');
   var row = -1;
   for (var i = 1; i < data.length; i++) {
@@ -119,11 +122,12 @@ function followLookup_(org, inv) { // -> {sh, data, c, row}; row is the 1-based 
   return { sh: sh, data: data, c: c, row: row };
 }
 
-function upsertFollowup_(org, inv, status, date) {
+function upsertFollowup_(org, inv, status, date, note) {
   var f = followLookup_(org, inv), sh = f.sh, c = f.c, row = f.row;
   if (row < 0) { row = sh.getLastRow() + 1; sh.getRange(row, c.org + 1).setValue(org); sh.getRange(row, c.inv + 1).setNumberFormat('@').setValue(inv); }
   sh.getRange(row, c.st + 1).setValue(status);
   sh.getRange(row, c.dt + 1).setNumberFormat('@').setValue(date); // text, so Sheets never turns it into a locale date
+  if (note && c.note >= 0) sh.getRange(row, c.note + 1).setNumberFormat('@').setValue(note); // text, so =/+ never runs as a formula; a tap without a note keeps the old one
 }
 
 /** Current Followups status for an invoice, e.g. "Promised 2026-10-20"; '' when none. */
@@ -147,7 +151,29 @@ function appendLog_(events) {
     seen[ev.id] = 1;
     rows.push([ts, ev.id, ev.type || '', ev.rep || '', ev.org || '', ev.invoice || (ev.invoices || []).join(', '), ev.action || '', ev.detail || '']);
   });
-  if (rows.length) sh.getRange(sh.getLastRow() + 1, 1, rows.length, LOG_HEAD.length).setValues(rows);
+  if (rows.length) {
+    var r = sh.getRange(sh.getLastRow() + 1, 1, rows.length, LOG_HEAD.length);
+    r.setNumberFormat('@').setValues(rows); // text, so Sheets never turns ts / promised dates into locale dates (remind.py reads this tab as CSV)
+  }
+}
+
+/** Monthly trigger: moves Log rows older than 90 days to the Archive tab. remind.py only reads the last 60 days. Rows are oldest-first, so the old ones are a block at the top. */
+function archiveLog() {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    var sh = ss_().getSheetByName(LOG);
+    if (!sh || sh.getLastRow() < 2) return;
+    var cut = Utilities.formatDate(new Date(Date.now() - 90 * 864e5), TZ, 'yyyy-MM-dd');
+    var ts = sh.getRange(2, 1, sh.getLastRow() - 1, 1).getValues(), n = 0;
+    while (n < ts.length && String(ts[n][0]).slice(0, 10) < cut) n++;
+    if (!n) return;
+    var ss = ss_(), arc = ss.getSheetByName('Archive') || ss.insertSheet('Archive');
+    if (arc.getLastRow() === 0) arc.appendRow(LOG_HEAD);
+    var rows = sh.getRange(2, 1, n, LOG_HEAD.length).getValues();
+    arc.getRange(arc.getLastRow() + 1, 1, n, LOG_HEAD.length).setNumberFormat('@').setValues(rows);
+    sh.deleteRows(2, n);
+  } finally { lock.releaseLock(); }
 }
 
 /** Opportunities tab: one row per draft invoice, kept forever. Drafts are lost opportunities to win back (upsell agent), never voided. */
@@ -174,7 +200,7 @@ function doPost(e) {
   var sig = (e && e.parameter && e.parameter.sig) || '';
   if (!sig) { // tap from the static page (page/index.html): {t, a, d}; logUpdate re-verifies the token
     var out;
-    try { var o = JSON.parse(body); out = { ok: true, msg: logUpdate(o.t, o.a, o.d) }; }
+    try { var o = JSON.parse(body); out = { ok: true, msg: logUpdate(o.t, o.a, o.d, o.m) }; }
     catch (err) { out = { ok: false, msg: String(err.message || err) }; }
     return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON);
   }
@@ -206,4 +232,5 @@ function heartbeat() {
 function installTriggers() {
   ScriptApp.getProjectTriggers().forEach(function (t) { ScriptApp.deleteTrigger(t); });
   ScriptApp.newTrigger('heartbeat').timeBased().atHour(10).nearMinute(30).everyDays(1).inTimezone(TZ).create();
+  ScriptApp.newTrigger('archiveLog').timeBased().onMonthDay(1).atHour(3).inTimezone(TZ).create();
 }
