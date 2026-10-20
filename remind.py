@@ -321,11 +321,12 @@ def wa_group(reps, items):
 def stats_block(rep, items, stats, outst, oldest):
     orgs = sorted({i["org"] for i in items})
     lines = [
+        f"Unpaid value: NGN {outst[rep]:,.0f}   To chase today: {sum(1 for i in items if i['kind'] != 'draft')}   Oldest unpaid: {oldest[rep]}d",
         f"Your fiscal-year collection rate: {fp(pct(stats.get(rep)))} (NGN {stats[rep][1]:,.0f} of {stats[rep][0]:,.0f} invoiced)" if rep in stats
         else "Your fiscal-year collection rate: n/a (nothing invoiced this fiscal year)",
         f"Team collection rate: {fp(pct(stats.get('__team__')))}",
         "Org rates: " + (", ".join(f"{o} {fp(pct(stats.get('org:' + o)))}" for o in orgs) or "n/a"),
-        f"Your outstanding: NGN {outst[rep]:,.0f}   Oldest unpaid: {oldest[rep]}d   Drafts awaiting billing: {sum(1 for i in items if i['kind'] == 'draft')}",
+        f"Drafts awaiting billing: {sum(1 for i in items if i['kind'] == 'draft')}",
     ]
     return "\n".join(lines)
 
@@ -509,14 +510,14 @@ def html_rep(rep, items, stats, outst, oldest, today, paused=(), promised=()):
     orgs = " &nbsp;&middot;&nbsp; ".join(f"{esc(o)} <b>{fp(pct(stats.get('org:' + o)))}</b>" for o in sorted({i["org"] for i in items}))
     sub = f"{money(s[1])} of {money(s[0])} invoiced" if s else "Nothing invoiced yet"
     kpis = ('<table width="100%" cellpadding="0" cellspacing="0"><tr>'
-            + kpi("Your collection rate", fp(p), rate_color(p), sub, p, first=True)
-            + kpi("Team rate", fp(team), rate_color(team), "All reps and unassigned", team)
-            + kpi("Outstanding", money(outst[rep]), INK, f"Oldest unpaid: {oldest[rep]}d") + '</tr></table>')
+            + kpi("Unpaid value", money(outst[rep]), INK, f"Oldest unpaid: {oldest[rep]}d", first=True)
+            + kpi("Needs action", str(len(open_)), TIER_COLOR[worst] if worst else "#16a34a", "invoices to chase today")
+            + kpi("Your collection rate", fp(p), rate_color(p), sub, p) + '</tr></table>')
     return shell("Collections brief", f"{today:%A, %d %B %Y} &nbsp;&middot;&nbsp; {esc(rep)}", [
         row(f'<div style="border-left:4px solid {TIER_COLOR[worst or "coach"]};padding:4px 14px;font-size:16px;line-height:24px">'
             f'{esc((OPENERS[worst] if worst else OPENERS["drafts"]).format(n=rep.split()[0]))}</div>', border=False),
         row(kpis, pad="0"),
-        row(f'<span style="font-size:12px;color:{MUTED}">Fiscal year to date (from {fy_start(today):%d %b %Y}) &nbsp;|&nbsp; Org rates: {orgs} &nbsp;|&nbsp; Drafts awaiting billing: <b>{len(drafts)}</b></span>',
+        row(f'<span style="font-size:12px;color:{MUTED}">Fiscal year to date (from {fy_start(today):%d %b %Y}) &nbsp;|&nbsp; Team rate <b>{fp(team)}</b> &nbsp;|&nbsp; Org rates: {orgs} &nbsp;|&nbsp; Drafts awaiting billing: <b>{len(drafts)}</b></span>',
             pad="12px 28px", bg="#f8fafc"),
         *([row(heading(f"Needs action ({len(open_)})") + action_table(open_)),
            row(heading("What to do today") + steps([
