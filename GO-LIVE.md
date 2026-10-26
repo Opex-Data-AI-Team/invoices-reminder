@@ -97,6 +97,63 @@ Use a **test copy of the Google Sheet** (Reps, Clients, Followups) with the Apps
 - [ ] Rules in play: a live promise moves to a quiet "Promised" list until its date; no tap for `IGNORE_DAYS` (3) working days raises the tier one step; scorecard covers the last 30 days
 - [ ] Happy with it: set variable `PHASE2=1`; every run, and so every rep email, uses the new rules. Rollback: delete `PHASE2`
 
+## 7c. End-to-end validation (test copy of the Sheet, every rep email set to yours)
+Pass bar: A to D before `SEND=1`; E and F before `PHASE2=1`; G any time. Overlaps with §6 on purpose: this is the single full pass.
+
+### A. Offline
+- [ ] A1 `python test_remind.py`: all 23 pass
+- [ ] A2 `python remind.py` without `SEND`, open `preview/*.html`: numbers, client names and tier colours right; open invoices show **Log update**; drafts under 30 days sit under "Waiting on billing"; no stale draft in rep emails; no `?t=` tokens in manager emails
+
+### B. Data and feeds
+- [ ] B1 Each `...exec?tab=Reps/Clients/Followups/Log&key=...` link in a private window returns CSV with the right header row
+- [ ] B2 A tab outside the allow-list (e.g. `tab=Secrets`) is rejected (proves the live script has the allow-list)
+- [ ] B3 A wrong `key` is rejected
+- [ ] B4 Dry run (`send=0`): one `[DRY RUN]` line per expected rep; unassigned section empty or understood; `cc` only on escalations
+
+### C. Tap page and link flow (on a phone, ideally signed into several Google accounts)
+- [ ] C1 Tap page with no token, then `?t=garbage`: "Link invalid or expired"
+- [ ] C2 **Log update** from a real email opens on the tap page (not `/macros/u/N/`), shows invoice number, client and balance, saves nothing yet
+- [ ] C3 **Chasing**: Followups = `Chasing`, `tap` row in `Log`
+- [ ] C4 Valid future date + **Save promise** stored as plain text (e.g. `2026-10-20`); past date and 90-days-out date rejected
+- [ ] C5 **Rep note** is stored in Followups
+- [ ] C6 **Paid** then **Disputed**: Followups holds the latest, `Log` holds both
+- [ ] C7 **Pause** + confirm: Status `Dead`; next run lists it under **Paused** with **Resume**
+- [ ] C8 **Resume**: Status `Chasing`, invoice back under **Needs action**
+- [ ] C9 One character of the token changed: rejected
+- [ ] C10 Link pasted into WhatsApp: the preview alone changes nothing
+- [ ] C11 Two tabs tapping at once, 3 or 4 times: no lost rows, no garbled cells
+- [ ] C12 Re-opened used link shows `Currently: <last status>`
+- [ ] C13 Draft **Client is waiting**: Status `Client waiting`; next run shows "CLIENT WAITING" and no second button
+
+### D. Sending, logging, safety
+- [ ] D1 `send=1`: emails arrive in Gmail, plain-text fallback fine; `Log` has one `sent` row per rep and one `run` row; `Opportunities` has one row per draft
+- [ ] D2 Same-day re-run: no duplicate `Log` rows; `Opportunities` only updates `Last seen`
+- [ ] D3 `DAILY_SEND_CAP=1` + `send=1`: "Refusing to send ...", nothing sent (clear the variable after)
+- [ ] D4 Wrong `APPS_SCRIPT_URL` + `send=1`: emails still send, log shows "WARNING: could not write run log" (restore the URL)
+- [ ] D5 `installTriggers`, skip a workday: "ALERT: collections reminder did not run today" arrives at 10:30 WAT
+- [ ] D6 (Optional) Broken `ZOHO_REFRESH_TOKEN`: run fails, GitHub emails you, no `run` row (restore it)
+- [ ] D7 Weekend run exits as a non-workday unless `FORCE` is set
+
+### E. Phase 2 (needs real or test taps in `Log`)
+- [ ] E1 `send=0` + `phase2=1`: manager summary on the run page with Rep response table and Escalations list
+- [ ] E2 A future-dated promise moves to the quiet **Promised** list
+- [ ] E3 After the promise date passes, the invoice returns to **Needs action**
+- [ ] E4 No tap for 3 working days after the first email: tier up one step, manager Cc'd a tier early
+- [ ] E5 Scorecard (last 30 days) counts per rep match the taps you made and skipped
+- [ ] E6 Without `PHASE2=1`, reminders are unchanged (rollback check)
+- [ ] E7 Monthly Log archive moves old rows to an archive tab and leaves the live `Log` intact
+
+### F. WhatsApp buttons (manager email)
+- [ ] F1 "Nudge on WhatsApp" for a `0803...` number opens WhatsApp to `234803...` with message and links prefilled
+- [ ] F2 Same for a `+234803...` number
+- [ ] F3 A rep with more than 3 invoices: message capped at 3, button still opens
+- [ ] F4 "Post to the reps group": summary only, no links
+- [ ] F5 Both buttons work from the manager email on iOS and Android
+
+### G. Docs and deploy
+- [ ] G1 `npx vercel --prod` as written in the README deploys the tap page
+- [ ] G2 Someone else follows the README (Zoho Self Client steps included) against a blank Sheet and finishes without asking you anything
+
 ## 8. After go-live (first week)
 - [ ] Check the 08:00 UTC (09:00 WAT) weekday run is green and a `run` row appears in `Log` each day
 - [ ] Check the unassigned count each day
