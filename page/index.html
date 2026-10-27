@@ -5,6 +5,9 @@
 body{font-family:Segoe UI,Arial,sans-serif;max-width:420px;margin:0 auto;padding:20px}
 button{display:block;width:100%;margin-top:10px;padding:14px;font-size:16px;border-radius:8px;border:1px solid #0f172a;background:#0f172a;color:#fff}
 #dead{background:#fff;color:#dc2626;border-color:#dc2626}
+button[data-action]{background:#fff;color:#0f172a}
+button[data-action][aria-pressed="true"]{background:#dbeafe;color:#1e40af;border:2px solid #2563eb}
+button:disabled{opacity:.6;cursor:wait}
 </style></head><body>
 <h2 id="h" style="margin:0"></h2><p id="sub" style="color:#64748b;margin:4px 0 20px"></p>
 <p id="info" style="margin:-8px 0 16px"></p>
@@ -14,22 +17,46 @@ button{display:block;width:100%;margin-top:10px;padding:14px;font-size:16px;bord
 // Tap page: same buttons as the Apps Script page, but fetch() sends no Google cookies, so Google's /u/N/ account redirect can't break it.
 // The signature is checked by Apps Script (logUpdate); this page only reads the token to show the invoice.
 var API = "https://script.google.com/macros/s/AKfycby3UJuEI8tHe-vOD-XNpb0YxsyNa0x0otiscijRxMlf2nxYmgSzAEUHXSPitNgcSO2b/exec";
-var T = new URLSearchParams(location.search).get("t") || "", P = null, armed = false;
+var params = new URLSearchParams(location.search);
+var T = params.get("t") || "", P = null, selected = "", busy = false;
+var preview = /^(localhost|127\.0\.0\.1)$/.test(location.hostname) && (params.get("preview") === "1" || T.endsWith('.preview'));
 try { var b = T.split(".")[0].replace(/-/g, "+").replace(/_/g, "/"); P = JSON.parse(atob(b + "===".slice((b.length + 3) % 4))); } catch (e) {}
+if (preview && !P) P = { n: "PREVIEW-001", o: "Demo Organization", r: "Demo Rep", a: 150000, e: "2099-12-31" };
 var $ = function (id) { return document.getElementById(id); };
 function btn(label, fn, id) { var x = document.createElement("button"); x.textContent = label; if (id) x.id = id; x.onclick = fn; $("btns").appendChild(x); return x; }
+function choice(label, action, id) {
+  var x = btn(label, function () { select(action); }, id);
+  x.dataset.action = action; x.setAttribute("aria-pressed", "false");
+}
+function select(action) {
+  if (busy) return;
+  selected = action;
+  document.querySelectorAll("button[data-action]").forEach(function (b) { b.setAttribute("aria-pressed", String(b.dataset.action === action)); });
+  $("msg").textContent = "Decision selected. Add an optional note below, then submit.";
+}
+function saving(value) {
+  busy = value;
+  document.querySelectorAll("#btns button, #btns input, #btns textarea").forEach(function (e) { e.disabled = value; });
+}
 var DEAD = "Pause: client unreachable (stop reminders)";
 function status() { // read-only: what is currently logged for this invoice, so a rep can see and correct it
+  if (preview) return;
   fetch(API + "?s=1&t=" + encodeURIComponent(T)).then(function (r) { return r.json(); }).then(function (j) {
     $("cur").textContent = j.status ? "Currently: " + j.status.replace(/^Dead/, "Paused") : "";
   }).catch(function () {});
 }
-function go(a) {
-  var d = $("d") ? $("d").value : "", m = $("n") ? $("n").value : ""; $("msg").textContent = "Saving...";
+function go() {
+  if (busy) return;
+  if (!selected) { $("msg").textContent = "Select a decision before submitting."; return; }
+  var a = selected, d = a === "promised" && $("d") ? $("d").value : "", m = $("n") ? $("n").value : "";
+  if (a === "promised" && !d) { $("msg").textContent = "Choose the promised payment date."; return; }
+  if (a === "dead" && !window.confirm("Pause reminders for this invoice?")) return;
+  if (preview) { $("msg").textContent = "Preview: decision and note submitted together. No spreadsheet was changed."; return; }
+  saving(true); $("msg").textContent = "Saving...";
   fetch(API, { method: "POST", body: JSON.stringify({ t: T, a: a, d: d, m: m }), headers: { "Content-Type": "text/plain" } })
     .then(function (r) { return r.json(); })
-    .then(function (j) { $("msg").textContent = (j.ok ? "" : "Not saved: ") + j.msg; if (j.ok) { armed = false; if ($("n")) $("n").value = ""; if ($("dead")) $("dead").textContent = DEAD; status(); } })
-    .catch(function () { $("msg").textContent = "Not saved: could not reach the server. Check your connection and tap again."; });
+    .then(function (j) { saving(false); $("msg").textContent = (j.ok ? "" : "Not saved: ") + j.msg; if (j.ok) { $("n").value = ""; selected = ""; document.querySelectorAll("button[data-action]").forEach(function (b) { b.setAttribute("aria-pressed", "false"); }); status(); } })
+    .catch(function () { saving(false); $("msg").textContent = "Not saved: could not reach the server. Check your connection and tap again."; });
 }
 if (!P || !P.n || (P.e && P.e < new Date().toISOString().slice(0, 10))) {
   $("h").textContent = "Link invalid or expired"; $("sub").textContent = "Use the link in today's collections email.";
@@ -37,23 +64,25 @@ if (!P || !P.n || (P.e && P.e < new Date().toISOString().slice(0, 10))) {
   $("h").textContent = "Invoice " + P.n; $("sub").textContent = P.o + " · " + P.r;
   if (P.c) $("info").innerHTML = "<b></b><br><span></span>", $("info").firstChild.textContent = P.c, $("info").lastChild.textContent = "₦" + Number(P.a || 0).toLocaleString("en-NG") + " outstanding";
   status();
+  $("btns").insertAdjacentHTML("beforeend", '<p>Choose the client\'s decision, add an optional note, then submit.</p>');
   if (P.k === "p") {
     $("btns").insertAdjacentHTML("beforebegin", "<p>Reminders are paused for this invoice.</p>");
-    btn("Resume reminders", function () { go("chasing"); });
+    choice("Resume reminders", "chasing");
   } else if (P.k === "d") {
     $("btns").insertAdjacentHTML("beforebegin", "<p>This invoice is still a draft. Finance issues it; you cannot change it.</p>");
-    btn("Client is waiting", function () { go("urgent"); });
+    choice("Client is waiting", "urgent");
   } else {
-    $("btns").insertAdjacentHTML("beforeend", '<textarea id="n" maxlength="300" placeholder="Note (optional): what the client said" style="font-size:16px;padding:8px;width:100%;box-sizing:border-box;height:70px"></textarea>');
-    btn("Chasing", function () { go("chasing"); });
+    choice("Chasing", "chasing");
     $("btns").insertAdjacentHTML("beforeend", '<label style="display:block;margin:12px 0 4px">Promised to pay on</label>' +
       '<input type="date" id="d" style="font-size:16px;padding:8px;width:100%;box-sizing:border-box">');
-    btn("Save promise", function () { go("promised"); });
-    btn("Client says paid", function () { go("paid"); });
-    btn("Disputed", function () { go("disputed"); });
-    btn(DEAD, function () {
-      if (!armed) { armed = true; $("dead").textContent = "Tap again to confirm: pause reminders"; return; } go("dead");
-    }, "dead");
+    choice("Promised to pay", "promised");
+    choice("Client says paid", "paid");
+    choice("Disputed", "disputed");
+    choice(DEAD, "dead", "dead");
   }
+  $("btns").insertAdjacentHTML("beforeend", '<label for="n" style="display:block;margin:24px 0 4px">Rep note</label>' +
+    '<textarea id="n" maxlength="300" placeholder="Explain the client\'s decision about this invoice" style="font-size:16px;padding:8px;width:100%;box-sizing:border-box;height:90px"></textarea>' +
+    '<p style="font-size:14px;color:#64748b;margin:4px 0">Optional: explain the decision above. Up to 300 characters. Nothing is saved until you submit.</p>');
+  btn("Submit update", go);
 }
 </script></body></html>
