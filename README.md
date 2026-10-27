@@ -204,7 +204,7 @@ Emails link to a small static page that calls the endpoint with `fetch`. This av
 3. GitHub variable `LINK_PAGE_URL` = that URL. (If unset, links open the Apps Script page directly; it works but breaks on multi-account phones.)
 
 ### What a rep sees
-Each open invoice in the email has a **Log update** button. The page shows the invoice, client and balance, the current status, an optional note box (saved to `Rep note`) and these buttons: **Chasing**, **Promised** (with a date within 60 days), **Client says paid**, **Disputed** and **Pause** (two taps; stops reminders until **Resume** in the next email). Drafts only offer **Client is waiting**. Opening a link changes nothing; only a button does. The last tap wins and the Log keeps every tap.
+Each open invoice in the email has a **Log update** button. Choose one decision: **Chasing**, **Promised to pay** (with a date within 60 days), **Client says paid**, **Disputed** or **Pause**. The selected decision is highlighted. Add an optional **Rep note** below (up to 300 characters), then click **Submit update** to save the decision and note together. Selecting a decision alone saves nothing. Pause asks for confirmation when submitting. Drafts offer **Client is waiting**; paused invoices offer **Resume reminders**. The latest note is stored in `Followups` under `Rep note` (the column is added if missing). Each submission is recorded in `Log`. Failed submissions retain the decision and note for retry.
 
 ## 10. Test it, then go live
 
@@ -326,3 +326,7 @@ fixture.json, preview/         local only, git-ignored (they contain client data
 - **Why Apps Script for taps:** it is free, runs under the Sheet owner's permissions, and a signed (HMAC-SHA256) link needs no login for reps. The page never trusts the browser: the endpoint re-verifies every token.
 - **Privacy:** CI never prints email bodies. Group WhatsApp messages carry no client data or links. The repo, the Sheet and the Log hold client names and balances, so keep them private and restrict the `Opportunities` tab.
 - **Known limits:** the Gmail send cap; GitHub cron can run late; the Sheet is the database; holidays count as working days; NGN only.
+
+### Local preview
+
+From the repository folder, run `python -m http.server 8000 --bind 127.0.0.1 --directory page`, then open `http://127.0.0.1:8000/?preview=1`. This local demo simulates submission without contacting the spreadsheet. Local sample tokens ending in `.preview` also work. On the hosted app, a valid invoice token is required. Stop the server with Ctrl+C.

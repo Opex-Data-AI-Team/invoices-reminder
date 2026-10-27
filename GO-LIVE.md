@@ -51,16 +51,16 @@ Use a **test copy of the Google Sheet** (Reps, Clients, Followups) with the Apps
 | 3 | Run with `send=1` (all rep emails go to you) | Emails arrive. `Log` tab appears with one `sent` row per rep and one `run` row. |
 | 4 | Re-run `send=1` the same day | No duplicate rows in `Log`. |
 | 5 | On your phone, tap **Log update** on an overdue invoice | A page opens with the invoice number. **Nothing is saved yet**; Followups is unchanged. |
-| 6 | Tap **Chasing** | "Saved: Chasing." Followups row with Status = Chasing; a `tap` row in `Log`. |
-| 7 | Open the link again, pick tomorrow's date, tap **Save promise** | Status = Promised; date stored as plain text like `2026-10-14` (not converted to a date). |
+| 6 | Select **Chasing**, then **Submit update** | "Saved: Chasing." Followups row with Status = Chasing; a `tap` row in `Log`. |
+| 7 | Open the link again, pick tomorrow's date, tap **Promised to pay**, then **Submit update** | Status = Promised; date stored as plain text like `2026-10-14` (not converted to a date). |
 | 8 | Try a past date, then a date 90 days out | Both rejected with a message. |
-| 9 | Tap **Paid**, then **Disputed** on the same invoice | Followups shows the latest only. `Log` shows both taps. |
-| 10 | Tap **Pause**, then confirm (needs a second tap) | Followups Status = `Dead`. After the next run the invoice no longer appears in emails. |
+| 9 | Submit **Paid**, then submit **Disputed** on the same invoice | Followups shows the latest only. `Log` shows both taps. |
+| 10 | Select **Pause**, click **Submit update**, then confirm | Followups Status = `Dead`. After the next run the invoice no longer appears in emails. |
 | 11 | Change one character of the token in a link | "Link invalid or expired". |
 | 12 | Two people (or two browser tabs) tap different buttons at the same moment, 3 or 4 times | No lost rows, no garbled cells. |
 | 13 | Paste a link into WhatsApp and send it to yourself | The link preview alone changes no data. |
-| 13a | Open a link you already used | Page shows `Currently: <last status>`. After a tap the buttons stay, and tapping another one overwrites Followups (`Log` keeps both). |
-| 13b | After test 10 (Pause), run `send=1` | The invoice is listed under **Paused** with a **Resume** button. Tapping it sets Status = `Chasing` and the invoice returns to **Needs action** on the next run. |
+| 13a | Open a link you already used | Page shows `Currently: <last status>`. After submitting the buttons stay, and submitting another decision overwrites Followups (`Log` keeps both). |
+| 13b | After test 10 (Pause), run `send=1` | The invoice is listed under **Paused** with a **Resume** button. Selecting it and clicking **Submit update** sets Status = `Chasing` and the invoice returns to **Needs action** on the next run. |
 
 ### 6c. Drafts and opportunities
 | # | Do this | Expected |
@@ -113,17 +113,17 @@ Pass bar: A to D before `SEND=1`; E and F before `PHASE2=1`; G any time. Overlap
 ### C. Tap page and link flow (on a phone, ideally signed into several Google accounts)
 - [ ] C1 Tap page with no token, then `?t=garbage`: "Link invalid or expired"
 - [ ] C2 **Log update** from a real email opens on the tap page (not `/macros/u/N/`), shows invoice number, client and balance, saves nothing yet
-- [ ] C3 **Chasing**: Followups = `Chasing`, `tap` row in `Log`
-- [ ] C4 Valid future date + **Save promise** stored as plain text (e.g. `2026-10-20`); past date and 90-days-out date rejected
-- [ ] C5 **Rep note** is stored in Followups
-- [ ] C6 **Paid** then **Disputed**: Followups holds the latest, `Log` holds both
-- [ ] C7 **Pause** + confirm: Status `Dead`; next run lists it under **Paused** with **Resume**
-- [ ] C8 **Resume**: Status `Chasing`, invoice back under **Needs action**
+- [ ] C3 Select **Chasing**, then **Submit update**: Followups = `Chasing`, `tap` row in `Log`
+- [ ] C4 Valid future date + **Promised to pay**, then **Submit update** stored as plain text (e.g. `2026-10-20`); past date and 90-days-out date rejected
+- [ ] C5 Select a decision: no write occurs yet. Type an optional **Rep note**, then **Submit update**: the status, promised date (if applicable) and note save together in Followups, with one tap row in Log. Repeat on draft and paused invoices. Empty optional notes are allowed; submitting without a decision is rejected.
+- [ ] C6 Submit **Paid** then submit **Disputed**: Followups holds the latest, `Log` holds both
+- [ ] C7 **Pause** + **Submit update** + confirm: Status `Dead`; next run lists it under **Paused** with **Resume**
+- [ ] C8 Select **Resume**, then **Submit update**: Status `Chasing`, invoice back under **Needs action**
 - [ ] C9 One character of the token changed: rejected
 - [ ] C10 Link pasted into WhatsApp: the preview alone changes nothing
 - [ ] C11 Two tabs tapping at once, 3 or 4 times: no lost rows, no garbled cells
 - [ ] C12 Re-opened used link shows `Currently: <last status>`
-- [ ] C13 Draft **Client is waiting**: Status `Client waiting`; next run shows "CLIENT WAITING" and no second button
+- [ ] C13 Draft **Client is waiting** + **Submit update**: Status `Client waiting`; next run shows "CLIENT WAITING" and no second button
 
 ### D. Sending, logging, safety
 - [ ] D1 `send=1`: emails arrive in Gmail, plain-text fallback fine; `Log` has one `sent` row per rep and one `run` row; `Opportunities` has one row per draft

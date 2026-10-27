@@ -65,26 +65,35 @@ function doGet(e) {
     '<p style="color:#64748b;margin:4px 0 20px"><?= org ?> &middot; <?= rep ?></p>' +
     '<? if (client) { ?><p style="margin:-8px 0 16px"><b><?= client ?></b><br>&#8358;<?= amount ?> outstanding</p><? } ?>' +
     '<div id="btns">' +
+    '<p>Choose the client\'s decision, add an optional note, then submit.</p>' +
+    '<? if (paused) { ?><button data-action="chasing" aria-pressed="false" onclick="select(\'chasing\')">Resume reminders</button><? } else { ?>' +
     '<? if (draft) { ?><p>This invoice is still a draft. Finance issues it; you cannot change it.</p>' +
-    '<button onclick="go(\'urgent\')">Client is waiting</button><? } else { ?>' +
-    '<textarea id="n" maxlength="300" placeholder="Note (optional): what the client said" style="font-size:16px;padding:8px;width:100%;box-sizing:border-box;height:70px"></textarea>' +
-    '<button onclick="go(\'chasing\')">Chasing</button>' +
+    '<button data-action="urgent" aria-pressed="false" onclick="select(\'urgent\')">Client is waiting</button><? } else { ?>' +
+    '<button data-action="chasing" aria-pressed="false" onclick="select(\'chasing\')">Chasing</button>' +
     '<label style="display:block;margin:12px 0 4px">Promised to pay on</label>' +
     '<input type="date" id="d" style="font-size:16px;padding:8px;width:100%;box-sizing:border-box">' +
-    '<button onclick="go(\'promised\')">Save promise</button>' +
-    '<button onclick="go(\'paid\')">Client says paid</button>' +
-    '<button onclick="go(\'disputed\')">Disputed</button>' +
-    '<button id="dead" style="background:#fff;color:#dc2626;border-color:#dc2626" onclick="dead()">Pause: client unreachable (stop reminders)</button><? } ?>' +
+    '<button data-action="promised" aria-pressed="false" onclick="select(\'promised\')">Promised to pay</button>' +
+    '<button data-action="paid" aria-pressed="false" onclick="select(\'paid\')">Client says paid</button>' +
+    '<button data-action="disputed" aria-pressed="false" onclick="select(\'disputed\')">Disputed</button>' +
+    '<button data-action="dead" aria-pressed="false" onclick="select(\'dead\')">Pause: client unreachable (stop reminders)</button><? } } ?>' +
+    '<label for="n" style="display:block;margin:24px 0 4px">Rep note</label>' +
+    '<textarea id="n" maxlength="300" placeholder="Explain the client\'s decision about this invoice" style="font-size:16px;padding:8px;width:100%;box-sizing:border-box;height:90px"></textarea>' +
+    '<p style="font-size:14px;color:#64748b;margin:4px 0">Optional: explain the decision above. Up to 300 characters. Nothing is saved until you submit.</p>' +
+    '<button onclick="go()">Submit update</button>' +
     '</div><p id="msg" style="font-weight:600"></p>' +
     '<style>button{display:block;width:100%;margin-top:10px;padding:14px;font-size:16px;border-radius:8px;' +
-    'border:1px solid #0f172a;background:#0f172a;color:#fff}</style>' +
-    '<script>var T=<?!= tok ?>,armed=false;' +
-    'function dead(){var b=document.getElementById("dead");if(!armed){armed=true;b.textContent="Tap again to confirm: pause reminders";return;}go("dead");}' +
-    'function go(a){var e=document.getElementById("d"),d=e?e.value:"",n=document.getElementById("n"),m=n?n.value:"";document.getElementById("msg").textContent="Saving...";' +
-    'google.script.run.withSuccessHandler(function(m){document.getElementById("btns").style.display="none";' +
-    'document.getElementById("msg").textContent=m;}).withFailureHandler(function(x){document.getElementById("msg").textContent=' +
+    'border:1px solid #0f172a;background:#0f172a;color:#fff}button[data-action]{background:#fff;color:#0f172a}' +
+    'button[aria-pressed="true"]{background:#dbeafe;color:#1e40af;border:2px solid #2563eb}button:disabled{opacity:.6;cursor:wait}</style>' +
+    '<script>var T=<?!= tok ?>,selected="",busy=false;' +
+    'function select(a){if(busy)return;selected=a;document.querySelectorAll("button[data-action]").forEach(function(b){b.setAttribute("aria-pressed",String(b.dataset.action===a));});document.getElementById("msg").textContent="Decision selected. Add an optional note below, then submit.";}' +
+    'function saving(v){busy=v;document.querySelectorAll("#btns button,#btns input,#btns textarea").forEach(function(e){e.disabled=v;});}' +
+    'function go(){if(busy)return;var msg=document.getElementById("msg");if(!selected){msg.textContent="Select a decision before submitting.";return;}' +
+    'var a=selected,e=document.getElementById("d"),d=a==="promised"&&e?e.value:"",n=document.getElementById("n"),m=n.value;' +
+    'if(a==="promised"&&!d){msg.textContent="Choose the promised payment date.";return;}if(a==="dead"&&!window.confirm("Pause reminders for this invoice?"))return;saving(true);msg.textContent="Saving...";' +
+    'google.script.run.withSuccessHandler(function(m){saving(false);document.getElementById("n").value="";selected="";document.querySelectorAll("button[data-action]").forEach(function(b){b.setAttribute("aria-pressed","false");});' +
+    'document.getElementById("msg").textContent=m;}).withFailureHandler(function(x){saving(false);document.getElementById("msg").textContent=' +
     '"Not saved: "+x.message;}).logUpdate(T,a,d,m);}</script></body>');
-  t.client = p.c || ''; t.amount = String(Math.round(p.a || 0)).replace(/\B(?=(\d{3})+$)/g, ','); t.num = p.n; t.org = p.o; t.rep = p.r; t.draft = p.k === 'd'; t.tok = JSON.stringify(e.parameter.t);
+  t.client = p.c || ''; t.amount = String(Math.round(p.a || 0)).replace(/\B(?=(\d{3})+$)/g, ','); t.num = p.n; t.org = p.o; t.rep = p.r; t.draft = p.k === 'd'; t.paused = p.k === 'p'; t.tok = JSON.stringify(e.parameter.t);
   return page_(t.evaluate().getContent());
 }
 
@@ -92,21 +101,23 @@ function doGet(e) {
 function logUpdate(token, action, date, note) {
   var p = verifyToken_(token);
   if (!p) throw new Error('Link invalid or expired');
-  if (!ACTIONS.hasOwnProperty(action)) throw new Error('Unknown action');
-  if ((p.k === 'd') !== (action === 'urgent') || (p.k === 'p' && action !== 'chasing')) throw new Error('That action is not available for this invoice'); // drafts: only "Client is waiting"; paused: only Resume (Chasing)
+  if (action !== 'note' && !ACTIONS.hasOwnProperty(action)) throw new Error('Unknown action');
+  if (action !== 'note' && ((p.k === 'd') !== (action === 'urgent') || (p.k === 'p' && action !== 'chasing'))) throw new Error('That action is not available for this invoice'); // notes are available for all invoice kinds
   if (action === 'promised') {
     var max = Utilities.formatDate(new Date(Date.now() + 60 * 864e5), TZ, 'yyyy-MM-dd');
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date || '') || date < today_() || date > max) throw new Error('Pick a date within the next 60 days');
   } else { date = ''; }
   note = String(note || '').trim().slice(0, 300);
+  if (action === 'note' && !note) throw new Error('Type a note before saving');
   var lock = LockService.getScriptLock();
   lock.waitLock(20000);
   try {
-    upsertFollowup_(p.o, p.n, ACTIONS[action], date, note);
+    upsertFollowup_(p.o, p.n, action === 'note' ? null : ACTIONS[action], date, note);
     appendLog_([{ id: 'tap:' + Utilities.getUuid(), type: 'tap', rep: p.r, org: p.o, invoice: p.n,
-      action: action, detail: date }]);
+      action: action, detail: action === 'note' ? note : date }]);
   } finally { lock.releaseLock(); }
-  return 'Saved: ' + ACTIONS[action] + (date ? ' ' + date : '') + '. You can close this page.';
+  return action === 'note' ? 'Note saved to the spreadsheet. Invoice status unchanged.' :
+    'Saved: ' + ACTIONS[action] + (date ? ' ' + date : '') + '. You can close this page.';
 }
 
 function followLookup_(org, inv) { // -> {sh, data, c, row}; row is the 1-based sheet row, or -1 when this invoice has none yet
@@ -124,9 +135,15 @@ function followLookup_(org, inv) { // -> {sh, data, c, row}; row is the 1-based 
 
 function upsertFollowup_(org, inv, status, date, note) {
   var f = followLookup_(org, inv), sh = f.sh, c = f.c, row = f.row;
+  if (note && c.note < 0) {
+    c.note = sh.getLastColumn();
+    sh.getRange(1, c.note + 1).setValue('Rep note');
+  }
   if (row < 0) { row = sh.getLastRow() + 1; sh.getRange(row, c.org + 1).setValue(org); sh.getRange(row, c.inv + 1).setNumberFormat('@').setValue(inv); }
-  sh.getRange(row, c.st + 1).setValue(status);
-  sh.getRange(row, c.dt + 1).setNumberFormat('@').setValue(date); // text, so Sheets never turns it into a locale date
+  if (status !== null) {
+    sh.getRange(row, c.st + 1).setValue(status);
+    sh.getRange(row, c.dt + 1).setNumberFormat('@').setValue(date); // text, so Sheets never turns it into a locale date
+  }
   if (note && c.note >= 0) sh.getRange(row, c.note + 1).setNumberFormat('@').setValue(note); // text, so =/+ never runs as a formula; a tap without a note keeps the old one
 }
 
